@@ -22,11 +22,12 @@ export interface ConnectionSystem {
   adjacency: Map<number, number[]>;
   // GPU buffers
   linePositions: Float32Array;
-  lineColors: Float32Array;
   lineActivities: Float32Array;
   lineGeometry: THREE.BufferGeometry;
   lineSegments: THREE.LineSegments;
   material: THREE.ShaderMaterial;
+  // Live BufferAttribute for `aActivity` — must be flagged, not the raw array
+  actAttr: THREE.BufferAttribute;
 }
 
 // ─── Find nearest neighbors ─────────────────────────────────────────────────
@@ -116,10 +117,9 @@ function buildAdjacency(connections: NeuralConnection[]): Map<number, number[]> 
 function buildLineBuffers(
   connections: NeuralConnection[],
   nodes: NeuralNode[]
-): { positions: Float32Array; colors: Float32Array; activities: Float32Array } {
+): { positions: Float32Array; activities: Float32Array } {
   const vertexCount = connections.length * 2;
   const positions = new Float32Array(vertexCount * 3);
-  const colors = new Float32Array(vertexCount * 3);
   const activities = new Float32Array(vertexCount);
 
   // Build a lookup from node id to position
@@ -150,26 +150,32 @@ function buildLineBuffers(
     activities[i * 2 + 1] = conn.activity;
   }
 
-  return { positions, colors, activities };
+  return { positions, activities };
 }
 
 // ─── Update line activity buffer ─────────────────────────────────────────────
-export function updateConnectionActivities(system: ConnectionSystem): void {
-  const actAttr = system.lineActivities;
+export function updateConnectionActivities(
+  system: ConnectionSystem,
+  deltaTime: number
+): void {
+  const actAttr = system.actAttr; // BufferAttribute, not the Float32Array
+
+  // Frame-rate independent decay: same falloff at 30/60/120 Hz
+  const decay = Math.pow(ACTIVITY_DECAY, deltaTime * 60);
 
   for (let i = 0; i < system.connections.length; i++) {
     const conn = system.connections[i];
 
     // Decay activity
-    conn.activity *= ACTIVITY_DECAY;
+    conn.activity *= decay;
     if (conn.activity < 0.001) conn.activity = 0;
 
     // Update age
-    conn.age += 0.001;
+    conn.age += deltaTime;
 
     // Set activity for both vertices
-    actAttr[i * 2] = conn.activity;
-    actAttr[i * 2 + 1] = conn.activity;
+    actAttr.array[i * 2] = conn.activity;
+    actAttr.array[i * 2 + 1] = conn.activity;
   }
 
   actAttr.needsUpdate = true;
@@ -231,11 +237,14 @@ export function createConnections(
 ): ConnectionSystem {
   const connections = buildGraph(nodes);
   const adjacency = buildAdjacency(connections);
-  const { positions, colors, activities } = buildLineBuffers(connections, nodes);
+  const { positions, activities } = buildLineBuffers(connections, nodes);
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geometry.setAttribute('aActivity', new THREE.BufferAttribute(activities, 1));
+
+  // Keep the attribute handle so updates can flag it for re-upload
+  const actAttr = geometry.getAttribute('aActivity') as THREE.BufferAttribute;
 
   const material = createConnectionMaterial(color);
   const lineSegments = new THREE.LineSegments(geometry, material);
@@ -244,10 +253,10 @@ export function createConnections(
     connections,
     adjacency,
     linePositions: positions,
-    lineColors: colors,
     lineActivities: activities,
     lineGeometry: geometry,
     lineSegments,
-    material
+    material,
+    actAttr
   };
 }
