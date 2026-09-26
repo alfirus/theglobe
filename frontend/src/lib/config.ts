@@ -18,6 +18,7 @@
  *   HERMES_API_KEY                        generic fallback for all providers
  *   API_SERVER_KEY                        shared secret for /api/* (see assertApiRequest)
  *   PIPER_MODEL                           TTS model path
+ *   TTS_TIMEOUT_MS                        synthesis budget for POST /api/tts (default 120000)
  *   GLOB_ALLOWED_ORIGINS                  optional comma-separated extra upstream hosts
  *
  * Integration decisions (Maisarah, EM — integration flags #1/#2, ratified by Alya):
@@ -352,7 +353,12 @@ export function settingsToPublic(settings: SettingsFile = readSettings()): Publi
 
 // ── TTS model resolution (M4) ────────────────────────────────────────────
 
-/** Resolve the Piper model path from `PIPER_MODEL` or settings, validating existence. */
+/**
+ * Resolve the Piper model path from `PIPER_MODEL` or settings, validating existence.
+ *
+ * D5: both failure branches name the exact path that was looked for (and where it
+ * came from), so `POST /api/tts`'s 503 tells ops in one look what to fix.
+ */
 export function resolveTtsModelPath(settings: SettingsFile = readSettings()): {
 	modelPath: string | null;
 	error: string | null;
@@ -360,11 +366,12 @@ export function resolveTtsModelPath(settings: SettingsFile = readSettings()): {
 	const fromEnv = (process.env.PIPER_MODEL ?? '').trim();
 	const fromFile = (settings.tts?.modelPath ?? '').trim();
 	const modelPath = fromEnv || fromFile;
+	const source = fromEnv ? 'PIPER_MODEL env var' : 'tts.modelPath in settings';
 
 	if (!modelPath) {
 		return {
 			modelPath: null,
-			error: 'TTS model not configured — set the PIPER_MODEL env var or tts.modelPath in settings'
+			error: `TTS model not configured — no path in PIPER_MODEL (env) or tts.modelPath (settings file read: ${SETTINGS_FILE})`
 		};
 	}
 
@@ -372,10 +379,38 @@ export function resolveTtsModelPath(settings: SettingsFile = readSettings()): {
 		const stat = fs.statSync(modelPath);
 		if (!stat.isFile()) throw new Error('not a file');
 	} catch {
-		return { modelPath: null, error: `TTS model file not found: ${modelPath}` };
+		return { modelPath: null, error: `TTS model file not found: ${modelPath} (from ${source})` };
 	}
 
 	return { modelPath, error: null };
+}
+
+// ── TTS synthesis budget (D5) ────────────────────────────────────────────
+
+/**
+ * Default wall-clock budget for one `POST /api/tts` synthesis.
+ *
+ * Measured on the target machine (piper 1.2.0 + `en_US-lessac-medium.onnx`,
+ * idle): a short sentence is **0.6–0.8 s**; a full-length (~2.8 k char, 184 s of
+ * audio) reply is **27.6 s**. The old hard-coded 30 s cap sat on top of that,
+ * so anything longer — or a loaded machine — returned 504. 120 s clears a
+ * worst-case body with room to spare.
+ */
+export const DEFAULT_TTS_TIMEOUT_MS = 120_000;
+const MIN_TTS_TIMEOUT_MS = 1_000;
+const MAX_TTS_TIMEOUT_MS = 600_000;
+
+/**
+ * `TTS_TIMEOUT_MS` from env, clamped to [1 s, 10 min]. Unset, empty, non-numeric
+ * or non-positive ⇒ the default. Read per request so ops can tune it without a
+ * code change.
+ */
+export function resolveTtsTimeoutMs(): number {
+	const raw = (process.env.TTS_TIMEOUT_MS ?? '').trim();
+	if (!raw) return DEFAULT_TTS_TIMEOUT_MS;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_TTS_TIMEOUT_MS;
+	return Math.min(Math.max(Math.round(parsed), MIN_TTS_TIMEOUT_MS), MAX_TTS_TIMEOUT_MS);
 }
 
 // ── shared-secret guard for /api/* (P0-4) ────────────────────────────────
