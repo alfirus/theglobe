@@ -26,16 +26,153 @@
 
   // System prompt state
   let systemPrompt = $state('');
-  
-  // Load from localStorage on init
-  try {
-    const saved = JSON.parse(localStorage.getItem('globe-settings') || '{}');
-    if (saved.provider) selectedProvider = saved.provider;
-    if (saved.systemPrompt) systemPrompt = saved.systemPrompt;
-  } catch {}
 
-  // Provider health state
-  let providerHealth: Record<string, { status: 'unknown' | 'healthy' | 'unhealthy'; lastChecked?: number }> = {};
+  // Provider health state. Must be $state: mutating a plain object in runes
+  // mode never re-renders, so the badge/timestamp never moved (M11).
+  let providerHealth = $state<Record<string, { status: 'unknown' | 'healthy' | 'unhealthy'; lastChecked?: number }>>({});
+
+  interface StoredSettings {
+    provider?: Provider;
+    systemPrompt?: string;
+    configs?: Record<string, Partial<ProviderConfig>>;
+  }
+
+  function readStoredSettings(): StoredSettings {
+    try {
+      return JSON.parse(localStorage.getItem('globe-settings') || '{}');
+    } catch {
+      return {};
+    }
+  }
+
+  /** True when the server already holds an API key for the active provider. */
+  let keySaved = $state(false);
+
+  /** Every copy that stays in the browser is stripped of key material (§2). */
+  function stripKeys(configs: StoredSettings['configs']): StoredSettings['configs'] {
+    const out: NonNullable<StoredSettings['configs']> = {};
+    for (const [id, cfg] of Object.entries(configs || {})) {
+      if (!cfg) continue;
+      const { apiKey: _keptOnServer, ...rest } = cfg;
+      out[id] = rest;
+    }
+    return out;
+  }
+
+  /**
+   * Single persistence path for this modal (H3/H4: settings actually persist).
+   *
+   * - localStorage gets `{ provider, systemPrompt, configs }` **without** API keys:
+   *   key material may only live on the server (security review §2), and the local
+   *   copy is what survives a reload, so nothing secret is ever written here.
+   * - the same object is POSTed to `/api/settings` **with** the key, because the
+   *   server is the source of truth for `resolveConfig()`. If the key field is
+   *   empty the key is omitted, so editing the base URL later cannot wipe a key
+   *   that is already stored server-side.
+   * - a failed POST must never break the UI, hence the catch.
+   *
+   * @returns true when the server accepted the update.
+   */
+  async function persistSettings(): Promise<boolean> {
+    const stored = readStoredSettings();
+    const config = providers[selectedProvider];
+    if (!config) return false;
+
+    const serverConfig: Partial<ProviderConfig> = {
+      baseUrl: config.baseUrl,
+      model: config.model
+    };
+    if (config.apiKey) serverConfig.apiKey = config.apiKey;
+
+    const nextConfigs: NonNullable<StoredSettings['configs']> = {
+      ...(stored.configs || {}),
+      [selectedProvider]: serverConfig
+    };
+
+    try {
+      localStorage.setItem(
+        'globe-settings',
+        JSON.stringify({
+          ...stored,
+          provider: selectedProvider,
+          systemPrompt,
+          configs: stripKeys(nextConfigs)
+        })
+      );
+    } catch (err) {
+      console.error('Failed to save settings locally:', err);
+    }
+
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: selectedProvider,
+          systemPrompt,
+          configs: nextConfigs
+        })
+      });
+      if (res.ok && config.apiKey) keySaved = true;
+      return res.ok;
+    } catch (err) {
+      // Server unreachable — the UI keeps working off the local copy.
+      console.warn('Could not sync settings to server:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Ask the server whether a key exists. The value itself never comes back
+   * (new server) — and if an older server still echoes it, only the boolean is
+   * kept and the response is dropped.
+   */
+  async function refreshKeyStatus(): Promise<void> {
+    try {
+      const res = await fetch('/api/settings', { headers: { Accept: 'application/json' } });
+      if (!res.ok) return;
+      const data = await res.json();
+      const cfg = data?.configs?.[selectedProvider];
+      if (typeof data?.hasKey === 'boolean') keySaved = data.hasKey;
+      else if (cfg && typeof cfg.hasKey === 'boolean') keySaved = cfg.hasKey;
+      else if (cfg && typeof cfg.apiKey === 'string') keySaved = cfg.apiKey.length > 0;
+      else if (typeof data?.apiKey === 'string') keySaved = data.apiKey.length > 0;
+    } catch {
+      // Offline or pre-upgrade server: we simply don't know.
+    }
+  }
+
+  // Restore saved provider/system prompt/configs (called once, after `providers` exists).
+  function loadSavedSettings(): void {
+    const saved = readStoredSettings();
+    if (saved.provider && providers[saved.provider]) selectedProvider = saved.provider;
+    if (typeof saved.systemPrompt === 'string') systemPrompt = saved.systemPrompt;
+
+    let scrubbed = false;
+    for (const [id, config] of Object.entries(saved.configs || {})) {
+      const target = providers[id as Provider];
+      if (!target || !config) continue;
+      // baseUrl/model come back; apiKey never does — the field is write-only.
+      if (typeof config.baseUrl === 'string') target.baseUrl = config.baseUrl;
+      if (typeof config.model === 'string') target.model = config.model;
+      if (config.apiKey) {
+        scrubbed = true;
+        delete config.apiKey;
+      }
+    }
+
+    // Older builds wrote keys into localStorage — remove them on first load.
+    if (scrubbed) {
+      try {
+        localStorage.setItem(
+          'globe-settings',
+          JSON.stringify({ ...saved, configs: stripKeys(saved.configs) })
+        );
+      } catch (err) {
+        console.error('Failed to scrub stored API keys:', err);
+      }
+    }
+  }
 
   async function checkProviderHealth(providerId: Provider) {
     const config = providers[providerId];
@@ -83,24 +220,50 @@
     }
   }
 
-  // duplicate handleSelect removed (kept the one above at line 86 with health check logic)
+  /**
+   * Provider card click (H2): this function did not exist, so every click threw
+   * `ReferenceError: handleSelect is not defined` and provider switching was
+   * impossible. Selecting a provider updates state, tells the parent (which sets
+   * the `X-Provider` header), persists the choice and re-runs the health check.
+   */
+  function handleSelect(id: Provider) {
+    selectedProvider = id;
+    dispatch('change', id);
+    void persistSettings();
+    void refreshKeyStatus();
+    void handleHealthCheck();
+  }
 
   function toggle() {
     open = !open;
   }
 
   async function handleSystemPromptChange() {
-    try {
-      const settings = JSON.parse(localStorage.getItem('globe-settings') || '{}');
-      settings.systemPrompt = systemPrompt;
-      localStorage.setItem('globe-settings', JSON.stringify(settings));
-      
-      await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings)
-      });
-    } catch {}
+    await persistSettings();
+  }
+
+  // Base URL / API key / model edits — was `onChange={…}`, which Svelte 5 compiles
+  // to `addEventListener('Change')` and therefore never fired (H3).
+  async function handleProviderFieldChange() {
+    await persistSettings();
+  }
+
+  // Write-only API key field: the value is POSTed to the server and then dropped
+  // from component state, so it can never be written to localStorage. What the
+  // UI keeps is only the fact that a key exists ("✓ saved on server").
+  async function handleApiKeyChange() {
+    const savedToServer = await persistSettings();
+    const config = providers[selectedProvider];
+    if (savedToServer && config?.apiKey) {
+      config.apiKey = '';
+      keySaved = true;
+    }
+  }
+
+  // The badge timestamp is `number | undefined`; wrapping the `new Date(...)` call
+  // keeps svelte-check happy instead of asserting inside the template.
+  function formatHealthTime(lastChecked?: number): string {
+    return lastChecked ? new Date(lastChecked).toLocaleTimeString() : '';
   }
 
   async function handleHealthCheck() {
@@ -109,7 +272,9 @@
     }
   }
 
-  const providers: Record<Provider, ProviderConfig> = {
+  // `$state` so `bind:value` edits are visible to sibling reads (health check,
+  // the config header) instead of living only inside the input element.
+  let providers = $state<Record<Provider, ProviderConfig>>({
     hermes: {
       id: 'hermes',
       name: 'Hermes Agent AI Platform',
@@ -158,11 +323,15 @@
       apiKey: '',
       model: ''
     }
-  };
+  });
 
-  // Provider config defaults — mutated inline for two-way binding
-  const providerDefaults: Record<Provider, ProviderConfig> = { ...providers };
-  let activeProviders = $state(providerDefaults);
+  // Restore whatever the owner configured last session (provider, prompt, configs).
+  // Replaces the old `providerDefaults`/`activeProviders` pair: it was a shallow
+  // copy that shared every nested config object, and `activeProviders` was never
+  // read again (L11).
+  loadSavedSettings();
+  // Whether a key exists server-side (the value itself never leaves the server).
+  void refreshKeyStatus();
 </script>
 
 <!-- Settings Button (bottom right) -->
@@ -209,7 +378,7 @@
           <span class="health-label">Connection Status:</span>
           <span class="health-badge">{getHealthBadge(providerHealth[selectedProvider]?.status || 'unknown')}</span>
           {#if providerHealth[selectedProvider]?.lastChecked}
-            <small>{new Date(providerHealth[selectedProvider].lastChecked).toLocaleTimeString()}</small>
+            <small>{formatHealthTime(providerHealth[selectedProvider]?.lastChecked)}</small>
           {/if}
           <button class="check-health-btn" onclick={handleHealthCheck}>
             Check Connection
@@ -222,31 +391,21 @@
             type="text"
             bind:value={providers[selectedProvider].baseUrl}
             placeholder="e.g., http://localhost:1234/v1"
-            onChange={() => {
-              try {
-                const settings = JSON.parse(localStorage.getItem('globe-settings') || '{}');
-                settings.configs = settings.configs || {};
-                settings.configs[selectedProvider] = providers[selectedProvider];
-                localStorage.setItem('globe-settings', JSON.stringify(settings));
-              } catch {}
-            }}
+            onchange={handleProviderFieldChange}
           />
         </div>
 
         <div class="form-group">
-          <label>API Key (optional)</label>
+          <label>
+            API Key (optional)
+            {#if keySaved}<span class="key-saved">✓ saved on server</span>{/if}
+          </label>
+          <!-- Write-only: the value is POSTed to the server and never kept in the browser. -->
           <input
             type="password"
             bind:value={providers[selectedProvider].apiKey}
-            placeholder="sk-..."
-            onChange={() => {
-              try {
-                const settings = JSON.parse(localStorage.getItem('globe-settings') || '{}');
-                settings.configs = settings.configs || {};
-                settings.configs[selectedProvider] = providers[selectedProvider];
-                localStorage.setItem('globe-settings', JSON.stringify(settings));
-              } catch {}
-            }}
+            placeholder={keySaved ? '•••••••• (stored on the server)' : 'sk-...'}
+            onchange={handleApiKeyChange}
           />
         </div>
 
@@ -256,14 +415,7 @@
             type="text"
             bind:value={providers[selectedProvider].model}
             placeholder="e.g., qwen3.6-35b-a3b"
-            onChange={() => {
-              try {
-                const settings = JSON.parse(localStorage.getItem('globe-settings') || '{}');
-                settings.configs = settings.configs || {};
-                settings.configs[selectedProvider] = providers[selectedProvider];
-                localStorage.setItem('globe-settings', JSON.stringify(settings));
-              } catch {}
-            }}
+            onchange={handleProviderFieldChange}
           />
         </div>
 
@@ -274,7 +426,7 @@
             bind:value={systemPrompt}
             placeholder="e.g., You are a helpful AI assistant that speaks in a friendly and concise manner."
             rows="4"
-            onChange={handleSystemPromptChange}
+            onchange={handleSystemPromptChange}
           ></textarea>
         </div>
 
@@ -446,6 +598,13 @@
     color: #8899bb;
     margin-bottom: 6px;
     font-weight: 500;
+  }
+
+  .key-saved {
+    margin-left: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #4ade80;
   }
 
   .form-group input {
