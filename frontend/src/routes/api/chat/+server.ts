@@ -1,167 +1,164 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import fs from 'fs';
-import path from 'path';
+import {
+	assertApiRequest,
+	isAllowedUrl,
+	isProvider,
+	readSettings,
+	resolveConfig
+} from '$lib/config';
 
-const SETTINGS_FILE = path.join(process.cwd(), '.globe-settings.json');
+/** Request-shape caps (contract: POST /api/chat — see card t_afd2c465). */
+const MAX_MESSAGE = 32_000;
+const MAX_SYSTEM_PROMPT = 8_000;
+const MAX_HISTORY_ENTRIES = 40;
+const MAX_HISTORY_CONTENT = 16_000;
 
-type Provider = 'hermes' | 'lmstudio' | 'opencode' | 'openrouter' | 'deepseek' | 'openclaw';
-
-interface Settings {
-  provider?: Provider;
-  configs?: Record<string, any>;
-}
-
-function readSettings(): Settings {
-  try {
-    const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
-}
-
-function writeSettings(settings: Settings) {
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
-}
-
-const DEFAULTS: Record<Provider, Partial<{ baseUrl: string; apiKey: string; model: string }>> = {
-  hermes: { baseUrl: '', apiKey: 'sofia-voice-key-2026', model: 'hermes-agent' },
-  lmstudio: { baseUrl: 'http://localhost:1234/v1', apiKey: '' },
-  opencode: { baseUrl: 'http://localhost:8765/v1', apiKey: '' },
-  openrouter: { baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', model: '' },
-  deepseek: { baseUrl: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-chat' },
-  openclaw: { baseUrl: '', apiKey: '', model: '' }
-};
+type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
 async function callProvider(
-  baseUrl: string,
-  apiKey: string,
-  model: string,
-  messages: Array<{ role: string; content: string }>
+	baseUrl: string,
+	apiKey: string,
+	model: string,
+	messages: ChatMessage[]
 ): Promise<Response> {
-  const url = `${baseUrl}/chat/completions`;
-  
-  console.log(`Calling provider at ${url} with model ${model}`);
+	const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ model, messages, stream: true })
-  });
+	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+	if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error(`Provider API error (${baseUrl}):`, response.status, errorText);
-    throw new Error(`Provider error: ${response.status}`);
-  }
+	// Key material is never logged — only the endpoint and model.
+	console.log(`Calling provider at ${url} with model ${model}`);
 
-  // Stream SSE response back to client
-  const reader = response.body!.getReader();
-  const decoder = new TextDecoder();
+	const response = await fetch(url, {
+		method: 'POST',
+		headers,
+		body: JSON.stringify({ model, messages, stream: true })
+	});
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      let buffer = '';
+	if (!response.ok || !response.body) {
+		const status = response.status;
+		console.error(`Provider API error (${url}): HTTP ${status}`);
+		throw new Error(`Provider error: ${status}`);
+	}
 
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+	// Relay the upstream SSE stream unchanged: `data: {"content":…}` / `data: [DONE]`.
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
 
-          buffer += decoder.decode(value, { stream: true });
+	const stream = new ReadableStream({
+		async start(controller) {
+			let buffer = '';
+			try {
+				for (;;) {
+					const { done, value } = await reader.read();
+					if (done) break;
 
-          // Process complete SSE lines
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
+					buffer += decoder.decode(value, { stream: true });
+					const lines = buffer.split('\n');
+					buffer = lines.pop() || '';
 
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const data = line.slice(6).trim();
-              if (data === '[DONE]') {
-                controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-                continue;
-              }
-              try {
-                const parsed = JSON.parse(data);
-                const content = parsed.choices?.[0]?.delta?.content;
-                if (content) {
-                  controller.enqueue(
-                    new TextEncoder().encode(`data: ${JSON.stringify({ content })}\n\n`)
-                  );
-                }
-              } catch {
-                // Skip malformed JSON
-              }
-            }
-          }
-        }
-      } catch (err) {
-        console.error('Stream read error:', err);
-      } finally {
-        controller.close();
-      }
-    }
-  });
+					for (const line of lines) {
+						if (!line.startsWith('data: ')) continue;
+						const data = line.slice(6).trim();
+						if (data === '[DONE]') {
+							controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+							continue;
+						}
+						try {
+							const parsed = JSON.parse(data);
+							const content = parsed.choices?.[0]?.delta?.content;
+							if (content) {
+								controller.enqueue(
+									new TextEncoder().encode(`data: ${JSON.stringify({ content })}\n\n`)
+								);
+							}
+						} catch {
+							// Skip malformed upstream frames
+						}
+					}
+				}
+			} catch (err) {
+				console.error('Stream read error:', err instanceof Error ? err.message : 'unknown');
+			} finally {
+				try {
+					controller.close();
+				} catch {
+					/* already closed */
+				}
+			}
+		}
+	});
 
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive'
-    }
-  });
+	return new Response(stream, {
+		headers: {
+			'Content-Type': 'text/event-stream',
+			'Cache-Control': 'no-cache',
+			Connection: 'keep-alive'
+		}
+	});
 }
 
 export const POST: RequestHandler = async ({ request }) => {
-  const { message, systemPrompt } = await request.json();
+	const denied = assertApiRequest(request);
+	if (denied) return denied;
 
-  if (!message || typeof message !== 'string') {
-    return json({ error: 'Message is required' }, { status: 400 });
-  }
+	let body: Record<string, unknown>;
+	try {
+		body = (await request.json()) as Record<string, unknown>;
+	} catch {
+		return json({ error: 'Invalid JSON body' }, { status: 400 });
+	}
 
-  // Get selected provider from header or settings file
-  const providerHeader = request.headers.get('x-provider');
-  let providerId = (providerHeader || 'hermes') as Provider;
+	const message = body.message;
+	if (!message || typeof message !== 'string') {
+		return json({ error: 'Message is required' }, { status: 400 });
+	}
+	if (message.length > MAX_MESSAGE) {
+		return json({ error: `Message exceeds ${MAX_MESSAGE} characters` }, { status: 413 });
+	}
 
-  // Validate provider ID
-  if (!DEFAULTS[providerId]) {
-    return json({ error: `Invalid provider: ${providerId}` }, { status: 400 });
-  }
+	const providerId = request.headers.get('x-provider') || 'hermes';
+	if (!isProvider(providerId)) {
+		return json({ error: `Invalid provider: ${providerId}` }, { status: 400 });
+	}
 
-  // Read settings from file
-  const settings = readSettings();
-  
-  // Build config for this provider
-  const defaults = DEFAULTS[providerId];
-  const configs = settings.configs || {};
-  const config = {
-    baseUrl: (configs[providerId]?.baseUrl ?? defaults.baseUrl) || '',
-    apiKey: (configs[providerId]?.apiKey ?? defaults.apiKey) || '',
-    model: (configs[providerId]?.model ?? defaults.model) || ''
-  };
+	const settings = readSettings();
+	const config = resolveConfig(providerId, settings);
 
-  // Validate config
-  if (!config.baseUrl) {
-    return json({ error: `No base URL configured for ${providerId}` }, { status: 502 });
-  }
+	if (!config.baseUrl) {
+		return json({ error: `No base URL configured for ${providerId}` }, { status: 502 });
+	}
+	if (!isAllowedUrl(config.baseUrl)) {
+		return json({ error: `URL not allowed: ${config.baseUrl}` }, { status: 400 });
+	}
 
-  try {
-    // Build messages array with system prompt
-    const messages: Array<{ role: string; content: string }> = [];
-    
-    if (systemPrompt) {
-      messages.push({ role: 'system', content: systemPrompt });
-    }
-    
-    messages.push({ role: 'user', content: message });
-    
-    return await callProvider(config.baseUrl, config.apiKey, config.model, messages);
-  } catch (err) {
-    console.error('Chat error:', err);
-    return json({ error: `Cannot connect to ${providerId}` }, { status: 503 });
-  }
+	// Contract: systemPrompt in the body (H5). The legacy X-System-Prompt header is
+	// still accepted so a half-migrated client keeps working.
+	const bodyPrompt = typeof body.systemPrompt === 'string' ? body.systemPrompt : '';
+	const headerPrompt = request.headers.get('x-system-prompt') ?? '';
+	const systemPrompt = (bodyPrompt || headerPrompt).slice(0, MAX_SYSTEM_PROMPT);
+
+	const messages: ChatMessage[] = [];
+	if (systemPrompt.trim()) messages.push({ role: 'system', content: systemPrompt });
+
+	// Contract: history[] precedes message, capped to the most recent entries (H6).
+	if (Array.isArray(body.history)) {
+		for (const entry of body.history.slice(-MAX_HISTORY_ENTRIES)) {
+			if (!entry || typeof entry !== 'object') continue;
+			const { role, content } = entry as { role?: unknown; content?: unknown };
+			if ((role === 'user' || role === 'assistant') && typeof content === 'string' && content) {
+				messages.push({ role, content: content.slice(0, MAX_HISTORY_CONTENT) });
+			}
+		}
+	}
+
+	messages.push({ role: 'user', content: message });
+
+	try {
+		return await callProvider(config.baseUrl, config.apiKey, config.model, messages);
+	} catch (err) {
+		console.error('Chat error:', err instanceof Error ? err.message : 'unknown error');
+		return json({ error: `Cannot connect to ${providerId}` }, { status: 503 });
+	}
 };

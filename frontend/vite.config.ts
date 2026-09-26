@@ -16,5 +16,11 @@ export default defineConfig({
 			// See https://svelte.dev/docs/kit/adapters for more information about adapters.
 			adapter: adapter()
 		})
-	]
+	],
+
+	// P0-4: bind dev and preview to loopback only — /api/* must never be
+	// reachable from the LAN. The shared-secret/Origin guard in $lib/config is
+	// the second line of defence (DNS rebinding, hostile local pages).
+	server: { host: '127.0.0.1' },
+	preview: { host: '127.0.0.1' }
 });

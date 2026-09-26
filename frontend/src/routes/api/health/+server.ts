@@ -1,88 +1,90 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import fs from 'fs';
-import path from 'path';
+import {
+	assertApiRequest,
+	isAllowedUrl,
+	isProvider,
+	readSettings,
+	resolveConfig
+} from '$lib/config';
 
-const SETTINGS_FILE = path.join(process.cwd(), '.globe-settings.json');
+const PROBE_TIMEOUT_MS = 5000;
 
-type Provider = 'hermes' | 'lmstudio' | 'opencode' | 'openrouter' | 'deepseek' | 'openclaw';
-
-interface Settings {
-  provider?: Provider;
-  configs?: Record<string, any>;
-}
-
-function readSettings(): Settings {
-  try {
-    const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
-}
-
-const DEFAULTS: Record<Provider, Partial<{ baseUrl: string; apiKey: string; model: string }>> = {
-  hermes: { baseUrl: '', apiKey: 'sofia-voice-key-2026', model: 'hermes-agent' },
-  lmstudio: { baseUrl: 'http://localhost:1234/v1', apiKey: '' },
-  opencode: { baseUrl: 'http://localhost:8765/v1', apiKey: '' },
-  openrouter: { baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', model: '' },
-  deepseek: { baseUrl: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-chat' },
-  openclaw: { baseUrl: '', apiKey: '', model: '' }
-};
-
+/**
+ * POST /api/health — probe a configured provider.
+ *
+ * The caller-supplied `baseUrl` is validated against the upstream allow-list
+ * before anything is fetched (M15/§4.1-2): this endpoint must never turn into a
+ * general-purpose URL prober for internal networks or cloud metadata.
+ * Redirects are not followed for the same reason.
+ */
 export const POST: RequestHandler = async ({ request }) => {
-  const { providerId, baseUrl, apiKey } = await request.json();
+	const denied = assertApiRequest(request);
+	if (denied) return denied;
 
-  if (!providerId || !baseUrl) {
-    return json({ error: 'Provider ID and base URL are required' }, { status: 400 });
-  }
+	let body: Record<string, unknown>;
+	try {
+		body = (await request.json()) as Record<string, unknown>;
+	} catch {
+		return json({ error: 'Invalid JSON body' }, { status: 400 });
+	}
 
-  // Validate provider ID
-  if (!DEFAULTS[providerId as Provider]) {
-    return json({ error: `Invalid provider: ${providerId}` }, { status: 400 });
-  }
+	const providerId = body.providerId;
+	const baseUrl = typeof body.baseUrl === 'string' ? body.baseUrl.trim() : '';
 
-  const healthCheckUrls = [
-    `${baseUrl}/health`,
-    `${baseUrl}/v1/models`
-  ];
+	if (!providerId || !baseUrl) {
+		return json({ error: 'Provider ID and base URL are required' }, { status: 400 });
+	}
+	if (!isProvider(providerId)) {
+		return json({ error: `Invalid provider: ${providerId}` }, { status: 400 });
+	}
+	if (!isAllowedUrl(baseUrl)) {
+		return json({ error: `URL not allowed: ${baseUrl}` }, { status: 400 });
+	}
 
-  let healthy = false;
-  let responseTime = 0;
-  let error = '';
+	// A key is resolved from settings/env only — secrets are never accepted over
+	// the wire (advisory from the security review; accepting them is how C4 happened).
+	const apiKey = resolveConfig(providerId, readSettings()).apiKey;
 
-  for (const url of healthCheckUrls) {
-    try {
-      const startTime = Date.now();
-      const headers: Record<string, string> = {};
-      if (apiKey) {
-        headers['Authorization'] = `Bearer ${apiKey}`;
-      }
+	const root = baseUrl.replace(/\/+$/, '');
+	const healthCheckUrls = [`${root}/health`, `${root}/v1/models`];
 
-      const response = await fetch(url, {
-        method: 'GET',
-        headers,
-        signal: AbortSignal.timeout(5000)
-      });
+	let healthy = false;
+	let responseTime = 0;
+	let error = '';
 
-      responseTime = Date.now() - startTime;
+	for (const url of healthCheckUrls) {
+		try {
+			const startTime = Date.now();
+			const headers: Record<string, string> = {};
+			if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
-      if (response.ok || response.status === 200) {
-        healthy = true;
-        break;
-      }
-    } catch (err: any) {
-      error = err.message || 'Connection failed';
-      continue;
-    }
-  }
+			const response = await fetch(url, {
+				method: 'GET',
+				headers,
+				redirect: 'manual',
+				signal: AbortSignal.timeout(PROBE_TIMEOUT_MS)
+			});
 
-  return json({
-    providerId,
-    baseUrl,
-    healthy,
-    responseTime,
-    error: healthy ? '' : error || 'No health endpoint responded',
-    checkedAt: new Date().toISOString()
-  });
+			responseTime = Date.now() - startTime;
+
+			if (response.ok) {
+				healthy = true;
+				break;
+			}
+			error = `HTTP ${response.status}`;
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Connection failed';
+			continue;
+		}
+	}
+
+	return json({
+		providerId,
+		baseUrl,
+		healthy,
+		responseTime,
+		error: healthy ? '' : error || 'No health endpoint responded',
+		checkedAt: new Date().toISOString()
+	});
 };

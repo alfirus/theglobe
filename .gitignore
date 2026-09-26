@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+.svelte-kit/
+frontend/.svelte-kit/
+frontend/build/
+frontend/dist/
+.output/
+.vercel/
+.netlify/
+.wrangler/
+
+# Local settings — holds provider API keys, never commit (P0-7 / M14)
+.globe-settings.json
+**/.globe-settings.json
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# OS / editor
+.DS_Store
+Thumbs.db
