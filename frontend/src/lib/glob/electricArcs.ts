@@ -203,11 +203,7 @@ export function updateElectricArcs(
     }
   }
 
-  const posBuf = system.lineSegments.geometry.getAttribute('position') as THREE.BufferAttribute;
-  posBuf.array.set(posAttr);
-  posBuf.needsUpdate = true;
-
-  const alphaBuf = system.lineSegments.geometry.getAttribute('aAlpha') as THREE.BufferAttribute;
-  alphaBuf.array.set(alphaAttr);
-  alphaBuf.needsUpdate = true;
+  // CPU buffers above ARE the geometry attributes — only flag for upload
+  system.lineSegments.geometry.getAttribute('position')!.needsUpdate = true;
+  system.lineSegments.geometry.getAttribute('aAlpha')!.needsUpdate = true;
 }

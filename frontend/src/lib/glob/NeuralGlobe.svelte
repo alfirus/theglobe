@@ -30,7 +30,11 @@
   let scene: THREE.Scene;
   let camera: THREE.PerspectiveCamera;
   let composer: EffectComposer;
+  // Declared at component scope: animate() must see it (it was local to init())
+  let bloomPass: UnrealBloomPass;
   let clock: THREE.Clock;
+  let disposed = false;
+  let frameErrorReported = false;
 
   // Systems
   let nodeSystem: NodeSystem;
@@ -55,20 +59,69 @@
     background: 0x000000                    // Pure black
   };
 
+  // Hoisted targets so animate() allocates nothing per frame
+  const SPEAKING_COLOR = new THREE.Color(0xddaa44); // Warm amber while speaking
+  const ARC_COLOR = new THREE.Color(0x88ccff);
+
   onMount(() => {
     init();
-    animate();
+    if (!document.hidden) animate();
   });
 
   onDestroy(() => {
-    if (animationId) cancelAnimationFrame(animationId);
+    teardown();
+  });
+
+  // Full GPU teardown — geometries, materials, composer, context (M1)
+  function teardown() {
+    disposed = true;
+
+    if (animationId) {
+      cancelAnimationFrame(animationId);
+      animationId = 0;
+    }
+
+    window.removeEventListener('resize', onResize);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+
+    if (scene) {
+      scene.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (mesh.geometry) mesh.geometry.dispose();
+
+        const mat = mesh.material;
+        if (Array.isArray(mat)) {
+          mat.forEach((m) => m.dispose());
+        } else if (mat) {
+          mat.dispose();
+        }
+      });
+      scene.clear();
+    }
+
+    if (composer) composer.dispose();
+
     if (renderer) {
       renderer.dispose();
+      renderer.forceContextLoss();
       renderer.domElement.remove();
     }
-    if (composer) composer.dispose();
-    window.removeEventListener('resize', onResize);
-  });
+  }
+
+  // Pause the render loop while the tab is hidden (L12)
+  function onVisibilityChange() {
+    if (disposed || !renderer || !clock) return;
+
+    if (document.hidden) {
+      if (animationId) {
+        cancelAnimationFrame(animationId);
+        animationId = 0;
+      }
+    } else if (!animationId) {
+      clock.getDelta(); // discard time spent hidden so the first frame is small
+      animate();
+    }
+  }
 
   function init() {
     // Scene
@@ -85,7 +138,7 @@
       alpha: false
     });
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // cap for hiDPI + bloom
     renderer.toneMapping = THREE.ReinhardToneMapping;
     renderer.toneMappingExposure = 1.2;
     container.appendChild(renderer.domElement);
@@ -94,7 +147,7 @@
     composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
 
-    const bloomPass = new UnrealBloomPass(
+    bloomPass = new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
       0.15,  // strength — very subtle
       0.1,   // radius — tight
@@ -109,7 +162,9 @@
     // === NEW ARCHITECTURE ===
 
     // 1. Create nodes with clustering (includes core nodes)
-    const nodeResult = createNodes(COLORS.node);
+    // clone() so the material owns uColor — otherwise lerping it towards
+    // COLORS.node would be a no-op self-copy and never return to blue.
+    const nodeResult = createNodes(COLORS.node.clone());
     nodeSystem = nodeResult.system;
     nodePoints = nodeResult.points;
     nodeMaterial = nodeResult.material;
@@ -131,14 +186,15 @@
     globeGroup.add(ambientSystem.points);
 
     // 6. Create electric arcs between neurons
-    electricArcSystem = createElectricArcSystem(new THREE.Color(0x88ccff));
+    electricArcSystem = createElectricArcSystem(ARC_COLOR);
     globeGroup.add(electricArcSystem.lineSegments);
 
     // Clock
     clock = new THREE.Clock();
 
-    // Resize handler
+    // Listeners
     window.addEventListener('resize', onResize);
+    document.addEventListener('visibilitychange', onVisibilityChange);
   }
 
   function onResize() {
@@ -152,8 +208,23 @@
 
   function animate() {
     animationId = requestAnimationFrame(animate);
+    if (disposed || document.hidden) return;
 
-    const deltaTime = clock.getDelta();
+    try {
+      frameStep();
+      frameErrorReported = false;
+    } catch (err) {
+      // One bad frame must never kill the render loop — report once
+      if (!frameErrorReported) {
+        frameErrorReported = true;
+        console.error('[NeuralGlobe] frame step failed:', err);
+      }
+    }
+  }
+
+  function frameStep() {
+    // Clamp so a stalled tab can't produce a giant simulation step
+    const deltaTime = Math.min(clock.getDelta(), 0.1);
     const elapsed = clock.getElapsedTime();
 
     // === NEURAL SIMULATION (drives everything) ===
@@ -166,30 +237,24 @@
 
     // 3. Update node activities — decay, core pulse
     updateNodeActivities(nodeSystem.nodes, deltaTime);
-    pulseCoreNodes(nodeSystem.nodes, elapsed);
+    pulseCoreNodes(nodeSystem.nodes, elapsed, deltaTime);
 
     // 4. Update connection activities — decay
-    updateConnectionActivities(connectionSystem);
+    updateConnectionActivities(connectionSystem, deltaTime);
 
     // === RENDER (reads activity values) ===
 
     // Update node positions and activities from simulation
     updateNodes(nodeSystem, elapsed);
-    const posAttr = nodePoints.geometry.getAttribute('position') as THREE.BufferAttribute;
-    posAttr.array.set(nodeSystem.positions);
-    posAttr.needsUpdate = true;
-
-    const actAttr = nodePoints.geometry.getAttribute('aActivity') as THREE.BufferAttribute;
-    actAttr.array.set(nodeSystem.activities);
-    actAttr.needsUpdate = true;
+    // These CPU buffers ARE the geometry attributes — only flag the upload
+    (nodePoints.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+    (nodePoints.geometry.getAttribute('aActivity') as THREE.BufferAttribute).needsUpdate = true;
 
     // Update node shader time
     nodeMaterial.uniforms.uTime.value = elapsed;
 
     // Speaking/thinking state: shift node color to warm amber
-    const targetColor = isSpeaking
-      ? new THREE.Color(0xddaa44) // Warm amber when speaking
-      : COLORS.node; // Electric blue when idle
+    const targetColor = isSpeaking ? SPEAKING_COLOR : COLORS.node;
     nodeMaterial.uniforms.uColor.value.lerp(targetColor, 0.05);
 
     // Thinking/streaming state: increase bloom intensity for pulse effect
@@ -200,30 +265,19 @@
       bloomPass.strength = 0.15; // Default subtle bloom
     }
 
-    // Thinking state: increase spark emission rate via uniform
+    // Thinking state: boost node activity via uniform
+    const boost = nodeMaterial.uniforms.uActivityBoost;
     if (isThinking || isSpeaking) {
-      nodeMaterial.uniforms.uActivityBoost.value = Math.min(
-        nodeMaterial.uniforms.uActivityBoost.value + deltaTime * 2, 
-        1.0
-      );
+      boost.value = Math.min(boost.value + deltaTime * 2, 1.0);
     } else {
-      nodeMaterial.uniforms.uActivityBoost.value = Math.max(
-        nodeMaterial.uniforms.uActivityBoost.value - deltaTime * 3, 
-        0.0
-      );
+      boost.value = Math.max(boost.value - deltaTime * 3, 0.0);
     }
 
     // Update connection shader
     connectionSystem.material.uniforms.uTime.value = elapsed;
 
     // Update sparks from signals
-    updateSparks(
-      sparkSystem,
-      simulation.signals,
-      nodeSystem.positions,
-      nodeSystem.nodes,
-      deltaTime
-    );
+    updateSparks(sparkSystem, simulation.signals, nodeSystem.positions, deltaTime);
     sparkSystem.material.uniforms.uTime.value = elapsed;
 
     // Update ambient particles

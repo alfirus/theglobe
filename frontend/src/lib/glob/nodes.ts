@@ -192,6 +192,7 @@ export function createNodeGeometry(system: NodeSystem): THREE.BufferGeometry {
 export const nodeVertexShader = `
 uniform float uTime;
 uniform float uBrightness;
+uniform float uActivityBoost;
 
 attribute float aPhase;
 attribute float aBrightness;
@@ -205,10 +206,11 @@ void main() {
   vPhase = aPhase;
   vActivity = aActivity;
   
-  // Breathing is minimal — driven by position buffer, not shader
-  float breathe = sin(uTime * 0.8 + aPhase * 6.2831) * 0.15 + 0.85;
+  // Breathing is minimal — driven by position buffer, not shader.
+  // aPhase is stored in radians, so no second 2π conversion here.
+  float breathe = sin(uTime * 0.8 + aPhase) * 0.15 + 0.85;
   
-  float activityBoost = 0.5 + aActivity * 2.0;
+  float activityBoost = (0.5 + aActivity * 2.0) * (1.0 + uActivityBoost);
   vBrightness = aBrightness * breathe * uBrightness * activityBoost;
   
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
@@ -242,8 +244,8 @@ void main() {
   vec3 edgeColor = uColor * 1.2;
   vec3 color = mix(edgeColor, coreColor, core);
   
-  // Per-node color variation
-  float colorShift = sin(uTime * 0.5 + vPhase * 6.28) * 0.1;
+  // Per-node color variation (vPhase is in radians, like CPU breathing)
+  float colorShift = sin(uTime * 0.5 + vPhase) * 0.1;
   color.r += colorShift;
   color.b -= colorShift * 0.5;
   
@@ -261,7 +263,8 @@ export function createNodeMaterial(color: THREE.Color): THREE.ShaderMaterial {
     uniforms: {
       uTime: { value: 0 },
       uBrightness: { value: 0.9 },
-      uColor: { value: color }
+      uColor: { value: color },
+      uActivityBoost: { value: 0 }
     },
     transparent: true,
     blending: THREE.AdditiveBlending,

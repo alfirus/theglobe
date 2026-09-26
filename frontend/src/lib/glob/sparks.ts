@@ -62,8 +62,9 @@ void main() {
   float outerGlow = 1.0 - smoothstep(0.15, 0.5, dist);
   outerGlow = pow(outerGlow, 3.0) * 0.5;
   
-  // Life fade — quick in, slow out
-  float lifeFade = smoothstep(0.0, 0.1, vActive) * (1.0 - smoothstep(0.3, 0.6, vActive));
+  // Life fade — vActive is a 0→1→0 envelope over the whole path
+  // (written by updateSparks), so this only handles the fade-in.
+  float lifeFade = smoothstep(0.0, 0.1, vActive);
   
   vec3 color = mix(uHaloColor * 1.5, uCoreColor * 3.0, core);
   float alpha = (core * 1.5 + halo * 0.8 + outerGlow * 0.3) * lifeFade;
@@ -116,7 +117,6 @@ export function updateSparks(
   system: SparkSystem,
   signals: NeuralSignal[],
   nodePositions: Float32Array,
-  nodes: { id: number; position: THREE.Vector3 }[],
   deltaTime: number
 ): void {
   system.time += deltaTime;
@@ -140,13 +140,13 @@ export function updateSparks(
     const signal = signals[i];
     if (!signal.active || signal.path.length === 0) continue;
 
-    // Get current connection in path
-    const conn = signal.path[signal.connectionIndex];
-    if (!conn) continue;
+    // Get current hop in path — `from`/`to` record the direction the
+    // signal actually travels, so sparks never fly backwards.
+    const hop = signal.path[signal.connectionIndex];
+    if (!hop) continue;
 
-    // Get source and target positions from node positions buffer
-    const sourceIdx = conn.source * 3;
-    const targetIdx = conn.target * 3;
+    const sourceIdx = hop.from * 3;
+    const targetIdx = hop.to * 3;
 
     const sx = nodePositions[sourceIdx];
     const sy = nodePositions[sourceIdx + 1];
@@ -165,9 +165,13 @@ export function updateSparks(
     // Progress along current connection
     progAttr[sparkIdx] = signal.progress;
 
-    // Active state (fades out near end of path)
-    const pathProgress = (signal.connectionIndex + signal.progress) / signal.path.length;
-    activeAttr[sparkIdx] = 1.0 - pathProgress * 0.3;
+    // Visibility envelope over the whole path: fades in as the signal
+    // starts, full brightness mid-travel, fades out as it arrives.
+    const pathProgress = Math.min(
+      1,
+      (signal.connectionIndex + signal.progress) / signal.path.length
+    );
+    activeAttr[sparkIdx] = Math.sin(pathProgress * Math.PI);
 
     sparkIdx++;
   }
@@ -177,17 +181,8 @@ export function updateSparks(
     activeAttr[i] = 0;
   }
 
-  // Update GPU buffers
-  const posBuffer = system.points.geometry.getAttribute('position') as THREE.BufferAttribute;
-  const progBuffer = system.points.geometry.getAttribute('aProgress') as THREE.BufferAttribute;
-  const activeBuffer = system.points.geometry.getAttribute('aActive') as THREE.BufferAttribute;
-
-  posBuffer.array.set(posAttr);
-  posBuffer.needsUpdate = true;
-
-  progBuffer.array.set(progAttr);
-  progBuffer.needsUpdate = true;
-
-  activeBuffer.array.set(activeAttr);
-  activeBuffer.needsUpdate = true;
+  // CPU buffers above ARE the geometry attributes — only flag for upload
+  system.points.geometry.getAttribute('position')!.needsUpdate = true;
+  system.points.geometry.getAttribute('aProgress')!.needsUpdate = true;
+  system.points.geometry.getAttribute('aActive')!.needsUpdate = true;
 }
