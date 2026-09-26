@@ -95,6 +95,49 @@ function findNodeById(nodes: NeuralNode[], id: number): NeuralNode | undefined {
   return nodes.find(n => n.id === id);
 }
 
+/**
+ * Build a path by wandering the graph from `sourceId`.
+ *
+ * The graph is built from per-cluster nearest-neighbour edges, so it splits
+ * into ~35-node components and BFS (`findNeuralPath`) cannot reach a random
+ * target ~95% of the time — which used to mean `triggerNeuralEvent` gave up
+ * and no signal/spark ran at all. A walk keeps activity flowing: it stays on
+ * real connections, never immediately backtracks, and always terminates after
+ * `length` hops.
+ */
+function randomWalkPath(
+  sourceId: number,
+  length: number,
+  adjacency: Map<number, number[]>,
+  connections: NeuralConnection[]
+): NeuralHop[] {
+  const hops: NeuralHop[] = [];
+  let current = sourceId;
+  let previous = -1;
+
+  for (let i = 0; i < length; i++) {
+    const incident = adjacency.get(current) || [];
+    if (incident.length === 0) break;
+
+    // Prefer any edge that doesn't reverse the previous hop
+    const forward = incident.filter((connIdx) => {
+      const conn = connections[connIdx];
+      const other = conn.source === current ? conn.target : conn.source;
+      return other !== previous;
+    });
+    const pool = forward.length > 0 ? forward : incident;
+
+    const conn = connections[pool[Math.floor(Math.random() * pool.length)]];
+    const next = conn.source === current ? conn.target : conn.source;
+
+    hops.push({ conn, from: current, to: next });
+    previous = current;
+    current = next;
+  }
+
+  return hops;
+}
+
 // ─── Trigger a neural event ─────────────────────────────────────────────────
 export function triggerNeuralEvent(
   nodes: NeuralNode[],
@@ -124,9 +167,11 @@ export function triggerNeuralEvent(
     targetNode = nodes[Math.floor(Math.random() * nodes.length)];
   } while (targetNode.id === sourceNode.id);
 
-  // Find a path
+  // Find a path. BFS only reaches ~5% of random pairs (the graph is split
+  // into per-cluster components), so fall back to a walk — otherwise an
+  // unreachable target silently produced no signal and no spark at all.
   const pathLength = MIN_PATH_HOPS + Math.floor(Math.random() * (MAX_PATH_HOPS - MIN_PATH_HOPS + 1));
-  const path = findNeuralPath(
+  let path = findNeuralPath(
     sourceNode.id,
     targetNode.id,
     pathLength,
@@ -134,7 +179,16 @@ export function triggerNeuralEvent(
     connectionSystem.connections
   );
 
-  if (!path || path.length === 0) return;
+  if (!path || path.length === 0) {
+    path = randomWalkPath(
+      sourceNode.id,
+      pathLength,
+      connectionSystem.adjacency,
+      connectionSystem.connections
+    );
+  }
+
+  if (path.length === 0) return;
 
   // Create signal
   simulation.signals[slotIdx] = {
