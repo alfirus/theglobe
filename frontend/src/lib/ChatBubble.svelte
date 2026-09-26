@@ -1,46 +1,106 @@
+<script module lang="ts">
+  import DOMPurify from 'dompurify';
+
+  /**
+   * DOMPurify whitelists `data:` URIs for a few tags (`img`, `audio`, `video`, …)
+   * *in addition to* `ALLOWED_URI_REGEXP`, so `![x](data:image/svg+xml;base64,…)`
+   * would otherwise sail through sanitisation. Such images are inert inside an
+   * `<img>`, but the security review asks for every `data:`/`javascript:` URL to
+   * be gone, so they are stripped here as well. The hook is installed once per
+   * page because `DOMPurify` is a module-level singleton and repeated installs
+   * would stack up.
+   */
+  const hookState = globalThis as typeof globalThis & { __globePurifyHooked?: boolean };
+  if (
+    !hookState.__globePurifyHooked &&
+    typeof document !== 'undefined' &&
+    typeof DOMPurify.addHook === 'function'
+  ) {
+    hookState.__globePurifyHooked = true;
+    DOMPurify.addHook('afterSanitizeAttributes', (node: Element) => {
+      if (!node || node.nodeType !== 1) return;
+      for (const attr of ['src', 'href', 'xlink:href']) {
+        const value = node.getAttribute(attr);
+        if (value && /^\s*(?:data|javascript|vbscript):/i.test(value)) node.removeAttribute(attr);
+      }
+    });
+  }
+</script>
+
 <script lang="ts">
   import { marked } from 'marked';
-  
+
   export type Message = {
+    /** Client-only identity used to target the right bubble while streaming (see +page.svelte). */
+    id?: string;
     role: 'user' | 'assistant';
     text: string;
   };
 
   let { message }: { message: Message } = $props();
 
-  // Sanitize and render markdown safely
-  function renderMarkdown(text: string): string {
-    try {
-      marked.setOptions({
-        breaks: true,
-        gfm: true
-      });
-      
-      const html = marked.parse(text) as string;
-      
-      // Basic sanitization - remove script tags and event handlers
-      return html
-        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-        .replace(/\son\w+="[^"]*"/g, '');
-    } catch {
-      return text;
-    }
+  /**
+   * Sanitizer configuration for rendered markdown.
+   *
+   * `marked` passes raw HTML through untouched, so everything it produces has to
+   * survive this before it is injected with `{@html}`. The explicit allow-lists
+   * are what make the hostile payloads inert: `<img src=x onerror=…>` loses the
+   * handler attribute (no `on*` is ever allow-listed), `<iframe …>` is not a
+   * permitted tag at all, and `[x](javascript:…)` loses its `href` because the
+   * URI allow-list only accepts http(s)/mailto/tel/ftp and relative URLs — no
+   * `javascript:`, no `data:`. `data:` URIs that DOMPurify whitelists for images
+   * by default are removed by the module-level hook above.
+   */
+  const SANITIZE_OPTIONS = {
+    ALLOWED_TAGS: [
+      'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+      'p', 'br', 'hr', 'blockquote', 'pre', 'code',
+      'em', 'strong', 'del', 's', 'sub', 'sup', 'mark',
+      'ul', 'ol', 'li',
+      'a', 'img',
+      'table', 'thead', 'tbody', 'tr', 'th', 'td'
+    ],
+    ALLOWED_ATTR: ['href', 'title', 'alt', 'src', 'class', 'target', 'rel'],
+    FORBID_TAGS: [
+      'style', 'script', 'iframe', 'object', 'embed', 'form', 'input',
+      'button', 'textarea', 'select', 'option', 'svg', 'math', 'frame'
+    ],
+    FORBID_ATTR: ['style'],
+    ALLOWED_URI_REGEXP:
+      /^(?:(?:https?|mailto|tel|ftp):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
+  };
+
+  function escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
-  function formatText(text: string): string {
-    // Escape HTML entities for display
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+  // Render markdown, then sanitize before it ever reaches {@html}.
+  function renderMarkdown(text: string): string {
+    // No DOM (SSR) → plain escaped text, never unsanitized HTML.
+    if (typeof window === 'undefined') return escapeHtml(text);
+
+    try {
+      const html = marked.parse(text, { async: false, breaks: true, gfm: true });
+      return DOMPurify.sanitize(html, SANITIZE_OPTIONS);
+    } catch {
+      // Returning the raw text here would reopen the injection hole — escape it.
+      return escapeHtml(text);
+    }
   }
 </script>
 
 <div class="message {message.role}">
   <span class="role">{message.role === 'user' ? 'You' : 'Glob'}</span>
   {#if message.role === 'assistant'}
-    <div class="text markdown-content" innerHTML={renderMarkdown(message.text)}></div>
+    <div class="text markdown-content">{@html renderMarkdown(message.text)}</div>
   {:else}
-    <div class="text plain-text">{formatText(message.text)}</div>
+    <!-- Svelte escapes interpolated text, so this renders inert by construction. -->
+    <div class="text plain-text">{message.text}</div>
   {/if}
 </div>
 

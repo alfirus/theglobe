@@ -1,9 +1,11 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
 
-  let { visible = $bindable(false), onVoice }: { 
-    visible?: boolean; 
-    onVoice?: (text: string) => void;
+  // Voice results go out through the same `send` event as typed input — there is
+  // deliberately no second `onVoice` callback (L9: two paths, one of them a dead
+  // `console.log` stub in the parent).
+  let { visible = $bindable(false) }: {
+    visible?: boolean;
   } = $props();
 
   const dispatch = createEventDispatcher<{ send: string }>();
@@ -45,11 +47,6 @@
             input = '';
             voiceText = '';
             isListening = false;
-            
-            // Call parent handler if provided
-            if (onVoice) {
-              onVoice(finalText);
-            }
           }
         }
       };

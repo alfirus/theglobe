@@ -2,8 +2,15 @@
   import { onMount } from 'svelte';
   import type { Conversation } from '$lib/db';
 
+  /**
+   * The sidebar only ever renders the title and the relative time, so it asks for
+   * exactly that instead of the whole record (the full `Conversation` also carries
+   * `messages`/`provider`, which never appear here).
+   */
+  type SidebarConversation = Pick<Conversation, 'id' | 'title' | 'updatedAt'>;
+
   interface ConversationSidebarProps {
-    conversations?: Conversation[];
+    conversations?: SidebarConversation[];
     activeId?: string | null;
     onSelect?: (id: string) => void;
     onNew?: () => void;
@@ -19,13 +26,19 @@
     showDeleteConfirm = id;
   }
 
-  function confirmDelete(id: string) {
+  function confirmDelete(id: string, e: Event) {
+    // Called as `confirmDelete(conv.id, e)` — the missing `e` param was a type
+    // error, and without stopPropagation the confirm click also selected the
+    // conversation it was deleting (M8).
+    e.stopPropagation();
     onDelete(id);
     showDeleteConfirm = null;
   }
 
-  function formatDate(timestamp: number): string {
+  function formatDate(timestamp?: number): string {
+    if (!timestamp) return '';
     const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) return '';
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
     const diffMins = Math.floor(diffMs / 60000);
