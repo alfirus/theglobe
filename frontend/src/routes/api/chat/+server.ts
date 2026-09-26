@@ -7,12 +7,39 @@ import {
 	readSettings,
 	resolveConfig
 } from '$lib/config';
+import { errorFields, logEvent } from '$lib/log';
 
 /** Request-shape caps (contract: POST /api/chat — see card t_afd2c465). */
 const MAX_MESSAGE = 32_000;
 const MAX_SYSTEM_PROMPT = 8_000;
 const MAX_HISTORY_ENTRIES = 40;
 const MAX_HISTORY_CONTENT = 16_000;
+
+/**
+ * Deadline for the provider's *response headers* only (P1-2: "no request
+ * timeouts on the chat provider fetch"). Cleared the moment headers arrive, so
+ * a long streaming reply is never cut off by it — D8's silent 200-with-no-body
+ * now surfaces as `provider_timeout` instead of hanging the client for 120s.
+ */
+const CONNECT_TIMEOUT_MS = 15_000;
+
+/** Provider answered 4xx/5xx — carries the upstream status for the client. */
+class ProviderHttpError extends Error {
+	readonly status: number;
+	constructor(status: number) {
+		super(`Provider error: ${status}`);
+		this.name = 'ProviderHttpError';
+		this.status = status;
+	}
+}
+
+/** Provider sent no headers within `CONNECT_TIMEOUT_MS`. */
+class ProviderTimeoutError extends Error {
+	constructor() {
+		super(`Provider did not respond within ${CONNECT_TIMEOUT_MS}ms`);
+		this.name = 'ProviderTimeoutError';
+	}
+}
 
 type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
@@ -30,16 +57,36 @@ async function callProvider(
 	// Key material is never logged — only the endpoint and model.
 	console.log(`Calling provider at ${url} with model ${model}`);
 
-	const response = await fetch(url, {
-		method: 'POST',
-		headers,
-		body: JSON.stringify({ model, messages, stream: true })
-	});
+	// Headers-only deadline (see CONNECT_TIMEOUT_MS). The signal is dropped as
+	// soon as the headers land, so it can never abort the streaming body.
+	const gate = new AbortController();
+	const deadline = setTimeout(() => gate.abort(), CONNECT_TIMEOUT_MS);
+	let response: Response;
+	try {
+		response = await fetch(url, {
+			method: 'POST',
+			headers,
+			body: JSON.stringify({ model, messages, stream: true }),
+			signal: gate.signal
+		});
+	} catch (err) {
+		if (gate.signal.aborted) {
+			logEvent('chat', 'provider_timeout', { url, model, afterMs: CONNECT_TIMEOUT_MS }, 'error');
+			throw new ProviderTimeoutError();
+		}
+		throw err;
+	} finally {
+		clearTimeout(deadline);
+	}
 
-	if (!response.ok || !response.body) {
+	if (!response.ok) {
 		const status = response.status;
-		console.error(`Provider API error (${url}): HTTP ${status}`);
-		throw new Error(`Provider error: ${status}`);
+		logEvent('chat', 'provider_http_error', { url, model, upstream: status }, 'error');
+		throw new ProviderHttpError(status);
+	}
+	if (!response.body) {
+		logEvent('chat', 'provider_no_body', { url, model, upstream: response.status }, 'error');
+		throw new Error(`Provider returned HTTP ${response.status} with no body`);
 	}
 
 	// Relay the upstream SSE stream unchanged: `data: {"content":…}` / `data: [DONE]`.
@@ -49,6 +96,8 @@ async function callProvider(
 	const stream = new ReadableStream({
 		async start(controller) {
 			let buffer = '';
+			let forwarded = 0;
+			let malformedFrames = 0;
 			try {
 				for (;;) {
 					const { done, value } = await reader.read();
@@ -72,19 +121,37 @@ async function callProvider(
 								controller.enqueue(
 									new TextEncoder().encode(`data: ${JSON.stringify({ content })}\n\n`)
 								);
+								forwarded += 1;
 							}
 						} catch {
-							// Skip malformed upstream frames
+							// Skip malformed upstream frames — one line for the first, then a count.
+							malformedFrames += 1;
+							if (malformedFrames === 1) {
+								logEvent(
+									'chat',
+									'upstream_frame_malformed',
+									{ bytes: data.length },
+									'warn'
+								);
+							}
 						}
 					}
 				}
+				if (malformedFrames > 1) {
+					logEvent('chat', 'upstream_frames_malformed', { count: malformedFrames }, 'warn');
+				}
+				if (forwarded === 0) {
+					// 200 + SSE with nothing usable in it (D8): the client sees an empty
+					// stream; log the shape here so the two sides can be correlated.
+					logEvent('chat', 'upstream_stream_empty', { malformedFrames }, 'warn');
+				}
 			} catch (err) {
-				console.error('Stream read error:', err instanceof Error ? err.message : 'unknown');
+				logEvent('chat', 'stream_read_failed', { forwarded, ...errorFields(err) }, 'error');
 			} finally {
 				try {
 					controller.close();
-				} catch {
-					/* already closed */
+				} catch (closeErr) {
+					logEvent('chat', 'stream_close_skipped', errorFields(closeErr), 'debug');
 				}
 			}
 		}
@@ -106,31 +173,38 @@ export const POST: RequestHandler = async ({ request }) => {
 	let body: Record<string, unknown>;
 	try {
 		body = (await request.json()) as Record<string, unknown>;
-	} catch {
-		return json({ error: 'Invalid JSON body' }, { status: 400 });
+	} catch (err) {
+		logEvent('chat', 'request_body_invalid', errorFields(err), 'warn');
+		return json({ error: 'Invalid JSON body', code: 'invalid_request' }, { status: 400 });
 	}
 
 	const message = body.message;
 	if (!message || typeof message !== 'string') {
-		return json({ error: 'Message is required' }, { status: 400 });
+		return json({ error: 'Message is required', code: 'invalid_request' }, { status: 400 });
 	}
 	if (message.length > MAX_MESSAGE) {
-		return json({ error: `Message exceeds ${MAX_MESSAGE} characters` }, { status: 413 });
+		return json(
+			{ error: `Message exceeds ${MAX_MESSAGE} characters`, code: 'payload_too_large' },
+			{ status: 413 }
+		);
 	}
 
 	const providerId = request.headers.get('x-provider') || 'hermes';
 	if (!isProvider(providerId)) {
-		return json({ error: `Invalid provider: ${providerId}` }, { status: 400 });
+		return json({ error: `Invalid provider: ${providerId}`, code: 'invalid_provider' }, { status: 400 });
 	}
 
 	const settings = readSettings();
 	const config = resolveConfig(providerId, settings);
 
 	if (!config.baseUrl) {
-		return json({ error: `No base URL configured for ${providerId}` }, { status: 502 });
+		return json(
+			{ error: `No base URL configured for ${providerId}`, code: 'not_configured' },
+			{ status: 502 }
+		);
 	}
 	if (!isAllowedUrl(config.baseUrl)) {
-		return json({ error: `URL not allowed: ${config.baseUrl}` }, { status: 400 });
+		return json({ error: `URL not allowed: ${config.baseUrl}`, code: 'url_not_allowed' }, { status: 400 });
 	}
 
 	// Contract: systemPrompt in the body (H5). The legacy X-System-Prompt header is
@@ -158,7 +232,36 @@ export const POST: RequestHandler = async ({ request }) => {
 	try {
 		return await callProvider(config.baseUrl, config.apiKey, config.model, messages);
 	} catch (err) {
-		console.error('Chat error:', err instanceof Error ? err.message : 'unknown error');
-		return json({ error: `Cannot connect to ${providerId}` }, { status: 503 });
+		// One class per failure, all keeping the historical 503 status so the
+		// wire contract holds; the machine `code` is what the UI switches on.
+		if (err instanceof ProviderTimeoutError) {
+			logEvent('chat', 'provider_timeout', { provider: providerId, model: config.model }, 'error');
+			return json(
+				{
+					error: `${providerId} did not respond within ${CONNECT_TIMEOUT_MS / 1000}s`,
+					code: 'provider_timeout'
+				},
+				{ status: 503 }
+			);
+		}
+		if (err instanceof ProviderHttpError) {
+			const code = err.status === 401 || err.status === 403 ? 'provider_auth' : 'provider_http';
+			logEvent(
+				'chat',
+				'provider_http_error',
+				{ provider: providerId, model: config.model, upstream: err.status, code },
+				'error'
+			);
+			return json(
+				{
+					error: `${providerId} returned HTTP ${err.status}`,
+					code,
+					upstream: err.status
+				},
+				{ status: 503 }
+			);
+		}
+		logEvent('chat', 'provider_unreachable', { provider: providerId, ...errorFields(err) }, 'error');
+		return json({ error: `Cannot connect to ${providerId}`, code: 'provider_unreachable' }, { status: 503 });
 	}
 };

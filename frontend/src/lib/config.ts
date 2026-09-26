@@ -29,6 +29,7 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { errorFields, logEvent } from '$lib/log';
 
 export const PROVIDERS = [
 	'hermes',
@@ -88,7 +89,13 @@ export function readSettings(): SettingsFile {
 		const parsed: unknown = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
 		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
 		return parsed as SettingsFile;
-	} catch {
+	} catch (err) {
+		// A missing file is the normal fresh-setup case; anything else (truncated
+		// JSON, permission denied, oversized) silently reset every provider today —
+		// so it is logged, once per read, and still degrades to `{}`.
+		if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+			logEvent('config', 'settings_read_failed', errorFields(err), 'warn');
+		}
 		return {};
 	}
 }
