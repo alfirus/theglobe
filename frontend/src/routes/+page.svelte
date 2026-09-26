@@ -9,6 +9,7 @@
   import ConversationSidebar from '$lib/ConversationSidebar.svelte';
   import type { Message } from '$lib/ChatBubble.svelte';
   import * as db from '$lib/db';
+  import { loadEffectiveSettings, readLocalSettings } from '$lib/settingsSync';
 
   /**
    * In-memory conversation. Carries `createdAt`/`updatedAt` alongside the
@@ -46,19 +47,6 @@
   let stopRequested = false;
   let timedOut = false;
 
-  interface LocalSettings {
-    provider?: unknown;
-    systemPrompt?: unknown;
-  }
-
-  function readLocalSettings(): LocalSettings {
-    try {
-      return JSON.parse(localStorage.getItem('globe-settings') || '{}');
-    } catch {
-      return {};
-    }
-  }
-
   /** Accept only real provider ids — a corrupt/garbage value falls back (H4). */
   function normalizeProvider(value: unknown): Provider {
     return typeof value === 'string' && (PROVIDERS as string[]).includes(value)
@@ -82,7 +70,11 @@
     if (!browser) return;
 
     try {
-      const settings = readLocalSettings();
+      // D1: localStorage is not the only source of truth. On a fresh profile it
+      // is empty, and without the server's prefill the first message went out
+      // against an unconfigured provider (`502 Cannot connect to hermes`).
+      // Local values still win — this only fills what the browser never set.
+      const settings = await loadEffectiveSettings();
       selectedProvider = normalizeProvider(settings.provider);
       systemPrompt = typeof settings.systemPrompt === 'string' ? settings.systemPrompt : '';
 
@@ -99,6 +91,10 @@
       // Restore active conversation or create new one
       if (stored.length > 0) {
         activeConversationId = stored[0].id;
+        // D4: a restored conversation is exactly as active as a brand-new one.
+        // Without this the input bar stayed hidden after a reload until the
+        // globe was clicked.
+        showInput = true;
       } else {
         await createNewConversation();
       }

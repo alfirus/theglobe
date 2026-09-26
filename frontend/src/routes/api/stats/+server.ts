@@ -77,7 +77,9 @@ function cpuFromOs(): number | null {
 			const diff =
 				after.user - before.user +
 				after.nice - before.nice +
-				after.system - before.system +
+				// `os.cpus().times` exposes `sys`, not `system` — reading `.system`
+				// made this delta NaN (QA defect D7).
+				after.sys - before.sys +
 				after.idle - before.idle +
 				after.irq - before.irq;
 			idle += after.idle - before.idle;

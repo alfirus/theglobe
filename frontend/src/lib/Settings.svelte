@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { loadEffectiveSettings } from '$lib/settingsSync';
 
   export type Provider = 
     | 'hermes'
@@ -60,42 +61,103 @@
   }
 
   /**
+   * Fields the user actually edited during this session (QA defect D3).
+   *
+   * A provider-card click used to POST the *code-default* view of that provider
+   * (`model: ""`, stock base URL); `sanitizeSettingsBody` reads `""` as an
+   * explicit clear and `mergeSettings` overwrote the stored value — measured:
+   * `configs.lmstudio.model` went `qwen3.8-27b@q3_k_xl` → `""` from the click
+   * alone. Only what is listed here is ever sent or written, so an empty string
+   * reaches the server solely when the user cleared that field themselves.
+   *
+   * Deliberately not `$state`: nothing renders it, it only feeds persistence.
+   */
+  type EditableField = 'baseUrl' | 'model' | 'apiKey';
+  const edited = {
+    provider: false,
+    systemPrompt: false,
+    configs: {} as Record<string, Set<EditableField>>
+  };
+
+  function markEdited(id: Provider, field: EditableField): void {
+    const fields = edited.configs[id];
+    if (fields) fields.add(field);
+    else edited.configs[id] = new Set([field]);
+  }
+
+  function editedFields(id: Provider): EditableField[] {
+    const fields = edited.configs[id];
+    return fields ? [...fields] : [];
+  }
+
+  function hasEdits(providerId: Provider): boolean {
+    return edited.provider || edited.systemPrompt || editedFields(providerId).length > 0;
+  }
+
+  /** Everything edited has been stored → the next change starts clean. */
+  function clearEdited(): void {
+    edited.provider = false;
+    edited.systemPrompt = false;
+    edited.configs = {};
+  }
+
+  /**
    * Single persistence path for this modal (H3/H4: settings actually persist).
    *
-   * - localStorage gets `{ provider, systemPrompt, configs }` **without** API keys:
-   *   key material may only live on the server (security review §2), and the local
-   *   copy is what survives a reload, so nothing secret is ever written here.
-   * - the same object is POSTed to `/api/settings` **with** the key, because the
-   *   server is the source of truth for `resolveConfig()`. If the key field is
-   *   empty the key is omitted, so editing the base URL later cannot wipe a key
-   *   that is already stored server-side.
+   * - only what the user edited travels anywhere (D3): a provider-card click
+   *   posts `{ provider }` and nothing else, so the server-side prefill
+   *   survives a click on a clean profile;
+   * - localStorage gets `{ provider, systemPrompt, configs }` **without** API
+   *   keys: key material may only live on the server (security review §2), and
+   *   the local copy is what survives a reload, so nothing secret is written
+   *   here. A hydrated prefill is not copied in either — it stays server-side
+   *   and is re-read on every load;
+   * - the same edited fields are POSTed to `/api/settings`, because the server
+   *   is the source of truth for `resolveConfig()`. The key field is omitted
+   *   when empty, so editing the base URL later cannot wipe a key that is
+   *   already stored server-side;
    * - a failed POST must never break the UI, hence the catch.
    *
-   * @returns true when the server accepted the update.
+   * @returns true when the server accepted the update (or there was nothing to
+   * send).
    */
   async function persistSettings(): Promise<boolean> {
-    const stored = readStoredSettings();
     const config = providers[selectedProvider];
     if (!config) return false;
+    // Nothing was edited (e.g. a re-click of the already-active card): a POST
+    // here would have nothing to say and nothing to risk.
+    if (!hasEdits(selectedProvider)) return true;
 
-    const serverConfig: Partial<ProviderConfig> = {
-      baseUrl: config.baseUrl,
-      model: config.model
-    };
-    if (config.apiKey) serverConfig.apiKey = config.apiKey;
+    const stored = readStoredSettings();
+
+    const patch: Partial<ProviderConfig> = {};
+    for (const field of editedFields(selectedProvider)) {
+      if (field === 'apiKey') {
+        // Write-only: an empty key field means "leave the stored key alone".
+        if (config.apiKey) patch.apiKey = config.apiKey;
+      } else {
+        patch[field] = config[field];
+      }
+    }
+    const hasConfigPatch = Object.keys(patch).length > 0;
 
     const nextConfigs: NonNullable<StoredSettings['configs']> = {
       ...(stored.configs || {}),
-      [selectedProvider]: serverConfig
+      ...(hasConfigPatch ? { [selectedProvider]: patch } : {})
     };
+
+    const localProvider =
+      edited.provider || typeof stored.provider === 'string' ? selectedProvider : undefined;
+    const localPrompt =
+      edited.systemPrompt || typeof stored.systemPrompt === 'string' ? systemPrompt : undefined;
 
     try {
       localStorage.setItem(
         'globe-settings',
         JSON.stringify({
           ...stored,
-          provider: selectedProvider,
-          systemPrompt,
+          ...(localProvider !== undefined ? { provider: localProvider } : {}),
+          ...(localPrompt !== undefined ? { systemPrompt: localPrompt } : {}),
           configs: stripKeys(nextConfigs)
         })
       );
@@ -109,12 +171,16 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           provider: selectedProvider,
-          systemPrompt,
-          configs: nextConfigs
+          ...(edited.systemPrompt ? { systemPrompt } : {}),
+          ...(hasConfigPatch ? { configs: { [selectedProvider]: patch } } : {})
         })
       });
-      if (res.ok && config.apiKey) keySaved = true;
-      return res.ok;
+      if (res.ok) {
+        if (config.apiKey) keySaved = true;
+        clearEdited();
+        return true;
+      }
+      return false;
     } catch (err) {
       // Server unreachable — the UI keeps working off the local copy.
       console.warn('Could not sync settings to server:', err);
@@ -142,10 +208,25 @@
     }
   }
 
-  // Restore saved provider/system prompt/configs (called once, after `providers` exists).
-  function loadSavedSettings(): void {
-    const saved = readStoredSettings();
-    if (saved.provider && providers[saved.provider]) selectedProvider = saved.provider;
+  /**
+   * Structural view of a settings object: what `readStoredSettings()` returns
+   * and what `$lib/settingsSync` merges in from the server have to feed the
+   * same applier.
+   */
+  interface SettingsView {
+    provider?: string;
+    systemPrompt?: string;
+    configs?: Record<string, { baseUrl?: string; model?: string; apiKey?: string }>;
+  }
+
+  /**
+   * Apply a settings object — the local copy or the server-merged view — to
+   * component state. Returns whether it found legacy API keys to scrub.
+   */
+  function applyStoredSettings(saved: SettingsView): boolean {
+    if (saved.provider && providers[saved.provider as Provider]) {
+      selectedProvider = saved.provider as Provider;
+    }
     if (typeof saved.systemPrompt === 'string') systemPrompt = saved.systemPrompt;
 
     let scrubbed = false;
@@ -160,6 +241,13 @@
         delete config.apiKey;
       }
     }
+    return scrubbed;
+  }
+
+  // Restore saved provider/system prompt/configs (called once, after `providers` exists).
+  function loadSavedSettings(): void {
+    const saved = readStoredSettings();
+    const scrubbed = applyStoredSettings(saved);
 
     // Older builds wrote keys into localStorage — remove them on first load.
     if (scrubbed) {
@@ -174,38 +262,51 @@
     }
   }
 
+  /**
+   * D1: adopt the server's prefill for every field this browser never set.
+   *
+   * `loadEffectiveSettings()` merges the local copy with `GET /api/settings`
+   * (local wins, server fills the gaps) and writes nothing, so the prefill in
+   * `.globe-settings.json` keeps reaching a fresh profile on every load — and
+   * stays visible until the user actually edits a field. This is what makes the
+   * "zero-setup first message" goal hold.
+   */
+  async function hydrateFromServer(): Promise<void> {
+    const merged = await loadEffectiveSettings();
+    applyStoredSettings(merged);
+    // After hydration: whichever provider won, report its key status.
+    await refreshKeyStatus();
+  }
+
+  /**
+   * D2: probe through the server, never from the browser.
+   *
+   * The browser-side probe could not succeed for the configuration the owner
+   * actually runs: LM Studio answers no CORS headers (the fetch throws before a
+   * status can be read) and `config.apiKey` is `""` in the browser by design
+   * (write-only key), so a healthy provider still went 🔴. `POST /api/health`
+   * resolves the base URL *and* the key server-side, exactly like `/api/chat`
+   * does — the body carries only the provider id.
+   */
   async function checkProviderHealth(providerId: Provider) {
-    const config = providers[providerId];
-    if (!config.baseUrl) {
-      providerHealth[providerId] = { status: 'unhealthy', lastChecked: Date.now() };
-      return;
-    }
-
+    // No client-side short-circuit: this browser's copy can be empty (fresh
+    // profile, hydration still in flight) while the server already holds a
+    // working config, and a red badge on that provider is exactly the bug.
     try {
-      // Try common health endpoints
-      const urls = [
-        `${config.baseUrl}/health`,
-        `${config.baseUrl}/v1/models`
-      ];
+      const res = await fetch('/api/health', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providerId }),
+        // Server-side probe budget: up to two candidate URLs × 5 s each.
+        signal: AbortSignal.timeout(15_000)
+      });
+      const data: unknown = res.ok ? await res.json() : null;
+      const healthy =
+        !!data && typeof data === 'object' && (data as { healthy?: unknown }).healthy === true;
 
-      let healthy = false;
-      for (const url of urls) {
-        try {
-          const response = await fetch(url, { 
-            method: 'GET',
-            headers: config.apiKey ? { 'Authorization': `Bearer ${config.apiKey}` } : {},
-            signal: AbortSignal.timeout(3000)
-          });
-          if (response.ok || response.status === 200) {
-            healthy = true;
-            break;
-          }
-        } catch {}
-      }
-
-      providerHealth[providerId] = { 
-        status: healthy ? 'healthy' : 'unhealthy', 
-        lastChecked: Date.now() 
+      providerHealth[providerId] = {
+        status: healthy ? 'healthy' : 'unhealthy',
+        lastChecked: Date.now()
       };
     } catch {
       providerHealth[providerId] = { status: 'unhealthy', lastChecked: Date.now() };
@@ -228,6 +329,8 @@
    */
   function handleSelect(id: Provider) {
     selectedProvider = id;
+    // The selection itself is an edit: it is the one thing a card click means.
+    edited.provider = true;
     dispatch('change', id);
     void persistSettings();
     void refreshKeyStatus();
@@ -239,12 +342,15 @@
   }
 
   async function handleSystemPromptChange() {
+    edited.systemPrompt = true;
     await persistSettings();
   }
 
   // Base URL / API key / model edits — was `onChange={…}`, which Svelte 5 compiles
-  // to `addEventListener('Change')` and therefore never fired (H3).
-  async function handleProviderFieldChange() {
+  // to `addEventListener('Change')` and therefore never fired (H3). The field
+  // name travels with the handler so only the field the user touched is sent (D3).
+  async function handleProviderFieldChange(field: 'baseUrl' | 'model') {
+    markEdited(selectedProvider, field);
     await persistSettings();
   }
 
@@ -252,6 +358,7 @@
   // from component state, so it can never be written to localStorage. What the
   // UI keeps is only the fact that a key exists ("✓ saved on server").
   async function handleApiKeyChange() {
+    markEdited(selectedProvider, 'apiKey');
     const savedToServer = await persistSettings();
     const config = providers[selectedProvider];
     if (savedToServer && config?.apiKey) {
@@ -330,8 +437,10 @@
   // copy that shared every nested config object, and `activeProviders` was never
   // read again (L11).
   loadSavedSettings();
-  // Whether a key exists server-side (the value itself never leaves the server).
-  void refreshKeyStatus();
+  // D1: fill everything this browser has never set from the server's own view
+  // (that is what makes the server-side prefill show up on a fresh profile),
+  // then report whether a key exists for whichever provider won.
+  void hydrateFromServer();
 </script>
 
 <!-- Settings Button (bottom right) -->
@@ -391,7 +500,7 @@
             type="text"
             bind:value={providers[selectedProvider].baseUrl}
             placeholder="e.g., http://localhost:1234/v1"
-            onchange={handleProviderFieldChange}
+            onchange={() => handleProviderFieldChange('baseUrl')}
           />
         </div>
 
@@ -415,7 +524,7 @@
             type="text"
             bind:value={providers[selectedProvider].model}
             placeholder="e.g., qwen3.6-35b-a3b"
-            onchange={handleProviderFieldChange}
+            onchange={() => handleProviderFieldChange('model')}
           />
         </div>
 
