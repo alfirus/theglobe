@@ -427,6 +427,8 @@ function errorResponse(status: number, error: string): Response {
  *  4. `Host` must be loopback (kills DNS rebinding, where the attacker's page carries
  *     a same-origin-looking `Origin`). Off-loopback requests need the secret.
  */
+let warnedMissingSecret = false;
+
 export function assertApiRequest(request: Request): Response | null {
 	const host = request.headers.get('host');
 	const origin = request.headers.get('origin');
@@ -449,6 +451,12 @@ export function assertApiRequest(request: Request): Response | null {
 
 	// 2. Shared secret (timing-safe), either accepted header spelling
 	const key = (process.env.API_SERVER_KEY ?? '').trim();
+	if (!key && !warnedMissingSecret) {
+		warnedMissingSecret = true;
+		console.warn(
+			'[api] API_SERVER_KEY is not set — /api/* relies on the loopback bind plus Host/Origin checks only. Set API_SERVER_KEY (BLUEPRINT.md:278) to enforce the shared secret.'
+		);
+	}
 	if (key && headerKeyMatches(request, key)) return null;
 
 	// 3. Same-origin exemption

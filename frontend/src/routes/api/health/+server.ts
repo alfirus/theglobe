@@ -42,10 +42,9 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json({ error: `URL not allowed: ${baseUrl}` }, { status: 400 });
 	}
 
-	// A caller-supplied key is honoured for the probe; otherwise use the resolved one.
-	// It is used as a bearer token only and never echoed back.
-	const suppliedKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
-	const apiKey = suppliedKey || resolveConfig(providerId, readSettings()).apiKey;
+	// A key is resolved from settings/env only — secrets are never accepted over
+	// the wire (advisory from the security review; accepting them is how C4 happened).
+	const apiKey = resolveConfig(providerId, readSettings()).apiKey;
 
 	const root = baseUrl.replace(/\/+$/, '');
 	const healthCheckUrls = [`${root}/health`, `${root}/v1/models`];
