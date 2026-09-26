@@ -1,296 +1,285 @@
 import { json } from '@sveltejs/kit';
-import { execSync } from 'child_process';
-import { platform } from 'os';
+import { execFile } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+import { cpus, freemem, loadavg, platform, totalmem, uptime } from 'node:os';
+import { promisify } from 'node:util';
 import type { RequestHandler } from './$types';
+import { assertApiRequest } from '$lib/config';
 
-const os = platform();
+/**
+ * GET /api/stats — device stats for the status panel.
+ *
+ * M2: no `require()` anywhere (ESM) and the platform name no longer shadows the
+ * `os` import. M3: no synchronous spawns — CPU/RAM/uptime come from pure-Node
+ * `node:os` APIs, only the GPU probe shells out, asynchronously via `execFile`,
+ * and the whole payload is cached for 2s (the panel polls every 3s).
+ */
 
-/** Safe shell exec — returns trimmed stdout or empty string on failure. */
-function sh(cmd: string, timeoutMs = 5000): string {
-  try {
-    return execSync(cmd, { timeout: timeoutMs, encoding: 'utf-8', windowsHide: true }).trim();
-  } catch {
-    return '';
-  }
+const execFileAsync = promisify(execFile);
+
+const platformName = platform();
+const CACHE_MS = 2000;
+const EXEC_TIMEOUT_MS = 5000;
+const MIN_CPU_SAMPLE_MS = 400;
+
+type Ram = { percent: number; used: string; total: string };
+type Gpu = { percent: number; mem: string; total: string };
+type Stats = { cpu: number; ram: Ram; gpu: Gpu; uptime: string };
+
+const FALLBACK: Stats = {
+	cpu: 0,
+	ram: { percent: 0, used: '0', total: '0' },
+	gpu: { percent: 0, mem: '0', total: '0' },
+	uptime: '?'
+};
+
+/** Async helper for constant command strings — never request data, no shell pipes. */
+async function run(cmd: string, args: string[], timeoutMs = EXEC_TIMEOUT_MS): Promise<string> {
+	try {
+		const { stdout } = await execFileAsync(cmd, args, {
+			timeout: timeoutMs,
+			maxBuffer: 1024 * 1024,
+			windowsHide: true,
+			encoding: 'utf-8'
+		});
+		return String(stdout).trim();
+	} catch {
+		return '';
+	}
 }
 
-/** Windows-only PowerShell helper. */
-function ps(cmd: string): string {
-  return sh(`powershell -NoProfile -Command "${cmd}"`);
+/** Windows-only PowerShell probe (one async spawn, no shell string building). */
+function ps(command: string): Promise<string> {
+	return run('powershell', ['-NoProfile', '-NonInteractive', '-Command', command]);
 }
 
-// ── Platform-specific gatherers ──────────────────────────────────────
+// ── CPU ──────────────────────────────────────────────────────────────────
 
-function getCPU(): number {
-  if (os === 'win32') {
-    const raw = ps('Get-CimInstance Win32_Processor | Select-Object -ExpandProperty LoadPercentage');
-    return parseInt(raw) || 0;
-  }
-  if (os === 'darwin') {
-    // Sample 1-second average from top
-    const raw = sh("top -l 2 -n 0 | grep 'CPU usage' | tail -1");
-    // e.g. "CPU usage: 12.34% user, 5.67% sys, 81.99% idle"
-    const match = raw.match(/([\d.]+)%\s+idle/);
-    if (match) return Math.round(100 - parseFloat(match[1]));
-    // Fallback: try without trailing dot on idle
-    const altMatch = raw.match(/([\d.]+)%\s*idle/);
-    if (altMatch) return Math.round(100 - parseFloat(altMatch[1]));
-    return 0;
-  }
-  // Linux — multiple top output formats across distros
-  const raw = sh("top -bn2 -d 0.5 | grep '%Cpu' | tail -1") || sh("top -bn1 | head -30 | grep '[Cc]pu'");
-  // e.g. "%Cpu(s):  5.3 us,  2.1 sy, ... 91.8 id" or "%Cpu0:  6.2 us, ...
-  const match = raw.match(/([\d.]+)\s+id/);
-  if (match) return Math.round(100 - parseFloat(match[1]));
-  // Fallback for modern procps-ng format: "Cpu(s), 1.3 us, 2.4 sy, 96.3 id"
-  const altMatch = raw.match(/[,\s]([\d.]+)\s+id/);
-  if (altMatch) return Math.round(100 - parseFloat(altMatch[1]));
-  // Last resort: use Node's os.loadavg() as approximation
-  const load = require('os').loadavg();
-  const cores = require('os').cpus().length || 1;
-  return Math.min(Math.round((load[0] / cores) * 100), 100);
+let previousCpus: ReturnType<typeof cpus> | null = null;
+let previousSampleAt = 0;
+let lastCpuPercent: number | null = null;
+
+/**
+ * Pure-Node CPU usage from `os.cpus()` timing deltas (no process spawn).
+ * Returns null until a second sample a few hundred ms apart exists.
+ */
+function cpuFromOs(): number | null {
+	const now = Date.now();
+	const list = cpus();
+	if (list.length === 0) return null;
+
+	if (previousCpus && previousCpus.length === list.length && now - previousSampleAt >= MIN_CPU_SAMPLE_MS) {
+		let idle = 0;
+		let total = 0;
+		for (let i = 0; i < list.length; i++) {
+			const before = previousCpus[i].times;
+			const after = list[i].times;
+			const diff =
+				after.user - before.user +
+				after.nice - before.nice +
+				after.system - before.system +
+				after.idle - before.idle +
+				after.irq - before.irq;
+			idle += after.idle - before.idle;
+			total += diff;
+		}
+		previousCpus = list;
+		previousSampleAt = now;
+		if (total > 0) {
+			const used = 1 - idle / total;
+			lastCpuPercent = Math.max(0, Math.min(100, Math.round(used * 100)));
+			return lastCpuPercent;
+		}
+		return lastCpuPercent;
+	}
+
+	if (!previousCpus) {
+		previousCpus = list;
+		previousSampleAt = now;
+	}
+	return lastCpuPercent;
 }
 
-function getRAM(): { percent: number; used: string; total: string } {
-  const zero = { percent: 0, used: '0', total: '0' };
-
-  if (os === 'win32') {
-    const rawTotal = ps('Get-CimInstance Win32_OperatingSystem | Select-Object -ExpandProperty TotalVisibleMemorySize');
-    const rawFree = ps('Get-CimInstance Win32_OperatingSystem | Select-Object -ExpandProperty FreePhysicalMemory');
-    const totalKB = parseInt(rawTotal) || 0;
-    const freeKB = parseInt(rawFree) || 0;
-    if (totalKB === 0) return zero;
-    const usedKB = totalKB - freeKB;
-    return {
-      percent: Math.round((usedKB / totalKB) * 100),
-      used: (usedKB / 1048576).toFixed(1),
-      total: (totalKB / 1048576).toFixed(1)
-    };
-  }
-
-  if (os === 'darwin') {
-    // hw.memsize is bytes, vm_stat gives page-level breakdown
-    const rawTotal = sh('sysctl -n hw.memsize');
-    const totalBytes = parseInt(rawTotal) || 0;
-    if (totalBytes <= 0) return zero;
-
-    // Fallback to Node's os.totalmem() which is always reliable
-    const fallbackTotal = require('os').totalmem();
-    const pageSize = parseInt(sh('sysctl -n hw.pagesize')) || 16384;
-    const vmRaw = sh('vm_stat');
-
-    let availableBytes: number;
-    if (vmRaw && vmRaw.includes('Pages free')) {
-      // Parse free + inactive + speculative as "available-ish"
-      const freePages = parseInt(vmRaw.match(/Pages free\s*:\s*(\d+)/)?.[1] ?? '0') || 0;
-      const inactivePages = parseInt(vmRaw.match(/Pages inactive\s*:\s*(\d+)/)?.[1] ?? '0') || 0;
-      const speculativePages = parseInt(vmRaw.match(/Pages speculative\s*:\s*(\d+)/)?.[1] ?? '0') || 0;
-      availableBytes = (freePages + inactivePages + speculativePages) * pageSize;
-    } else {
-      // vm_stat unavailable — use Node os.freemem() directly
-      availableBytes = require('os').freemem();
-    }
-
-    const usedBytes = Math.max(0, totalBytes - availableBytes);
-    return {
-      percent: Math.min(Math.round((usedBytes / totalBytes) * 100), 100),
-      used: (usedBytes / (1024 ** 3)).toFixed(1),
-      total: (totalBytes / (1024 ** 3)).toFixed(1)
-    };
-  }
-
-  // Linux — read /proc/meminfo, with fallback to Node os() functions
-  const meminfo = sh('cat /proc/meminfo');
-  if (meminfo) {
-    const totalKB = parseInt(meminfo.match(/^MemTotal:\s+(\d+)/m)?.[1] ?? '0') || 0;
-    // MemAvailable added in kernel 3.14; fall back to MemFree + Buffers + Cached
-    let availableKB = parseInt(meminfo.match(/^MemAvailable:\s+(\d+)/m)?.[1]);
-    if (isNaN(availableKB)) {
-      const free = parseInt(meminfo.match(/^MemFree:\s+(\d+)/m)?.[1] ?? '0') || 0;
-      const buffers = parseInt(meminfo.match(/^Buffers:\s+(\d+)/m)?.[1] ?? '0') || 0;
-      const cached = parseInt(meminfo.match(/^Cached:\s+(\d+)/m)?.[1] ?? '0') || 0;
-      availableKB = free + buffers + cached;
-    }
-    if (totalKB > 0) {
-      const usedKB = Math.max(0, totalKB - availableKB);
-      return {
-        percent: Math.min(Math.round((usedKB / totalKB) * 100), 100),
-        used: (usedKB / 1048576).toFixed(1),
-        total: (totalKB / 1048576).toFixed(1)
-      };
-    }
-  }
-
-  // Linux fallback — use Node os() functions directly
-  const nTotal = require('os').totalmem();
-  const nFree = require('os').freemem();
-  const used = Math.max(0, nTotal - nFree);
-  return {
-    percent: Math.min(Math.round((used / (nTotal || 1)) * 100), 100),
-    used: (used / (1024 ** 3)).toFixed(1),
-    total: ((nTotal || 0) / (1024 ** 3)).toFixed(1)
-  };
+/** Load-average estimate used when no CPU delta is available yet. */
+function cpuFromLoad(): number {
+	const cores = cpus().length || 1;
+	return Math.min(Math.round((loadavg()[0] / cores) * 100), 100);
 }
 
-function getGPU(): { percent: number; mem: string; total: string } {
-  const zero = { percent: 0, mem: '0', total: '0' };
-
-  // ── NVIDIA (all platforms) ───────────────────────────────────────
-  try {
-    const nvidiaRaw = sh('nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits');
-    if (nvidiaRaw && nvidiaRaw.trim().length > 0) {
-      const parts = nvidiaRaw.split(',').map(s => s.trim());
-      if (parts.length === 3 && !isNaN(parseInt(parts[0]))) {
-        return {
-          percent: parseInt(parts[0]) || 0,
-          mem: parts[1] || '0',
-          total: parts[2] || '0'
-        };
-      }
-    }
-  } catch { /* nvidia-smi not available */ }
-
-  // ── macOS — GPU via system_profiler (Apple Silicon + Intel) ───────
-  if (os === 'darwin') {
-    const spRaw = sh('system_profiler SPDisplaysDataType');
-    if (spRaw) {
-      // Extract VRAM info from output
-      const vramMatch = spRaw.match(/Chipset Model:\s*(.+)/);
-      return {
-        percent: 0, // Apple Silicon doesn't expose GPU util via user-space
-        mem: vramMatch ? vramMatch[1].trim() : '0',
-        total: vramMatch ? vramMatch[1].trim() : '0'
-      };
-    }
-    return zero;
-  }
-
-  // ── Linux — AMD via rocm-smi, Intel iGPU fallback ────────────────
-  const rocmRaw = sh('rocm-smi --showuse --json 2>/dev/null');
-  if (rocmRaw) {
-    try {
-      const parsed = JSON.parse(rocmRaw);
-      const gpuKey = Object.keys(parsed).find(k => k.startsWith('card'));
-      if (gpuKey) {
-        return {
-          percent: parseInt(parsed[gpuKey]['GPU use (%)'] ?? '0') || 0,
-          mem: parsed[gpuKey]['GPU Memory Used (VRAM MB)'] ?? '0',
-          total: parsed[gpuKey]['GPU Memory Total (VRAM MB)'] ?? '0'
-        };
-      }
-    } catch { /* parse error */ }
-  }
-
-  // Linux Intel iGPU fallback — try intel_gpu_top or /sys/class/drm/card0/gt_total_freq/MHz
-  const intelTotal = sh('cat /sys/class/drm/card0/gt_total_freq/MHz 2>/dev/null');
-  if (intelTotal && parseInt(intelTotal) > 0) {
-    return { percent: 0, mem: '0', total: '0' };
-  }
-
-  // Linux — try glxinfo for Intel iGPU info as last resort
-  const glxRaw = sh('glxinfo 2>/dev/null | grep -i "opengl renderer"');
-  if (glxRaw) {
-    return { percent: 0, mem: '0', total: glxRaw.trim() };
-  }
-
-  return zero;
+async function getCPU(): Promise<number> {
+	const fromOs = cpuFromOs();
+	if (fromOs !== null) return fromOs;
+	return cpuFromLoad();
 }
 
-/** Format ms into human-readable uptime string. */
+// ── RAM ──────────────────────────────────────────────────────────────────
+
+function toRam(usedBytes: number, totalBytes: number): Ram {
+	const safeTotal = totalBytes || 1;
+	return {
+		percent: Math.min(Math.round((usedBytes / safeTotal) * 100), 100),
+		used: (usedBytes / 1024 ** 3).toFixed(1),
+		total: (totalBytes / 1024 ** 3).toFixed(1)
+	};
+}
+
+async function getRAM(): Promise<Ram> {
+	// Linux: /proc/meminfo gives MemAvailable, which beats freemem() (MemFree only).
+	if (platformName === 'linux') {
+		try {
+			const meminfo = await readFile('/proc/meminfo', 'utf-8');
+			const totalKB = parseInt(meminfo.match(/^MemTotal:\s+(\d+)/m)?.[1] ?? '0', 10) || 0;
+			let availableKB = parseInt(meminfo.match(/^MemAvailable:\s+(\d+)/m)?.[1] ?? '', 10);
+			if (isNaN(availableKB)) {
+				const free = parseInt(meminfo.match(/^MemFree:\s+(\d+)/m)?.[1] ?? '0', 10) || 0;
+				const buffers = parseInt(meminfo.match(/^Buffers:\s+(\d+)/m)?.[1] ?? '0', 10) || 0;
+				const cached = parseInt(meminfo.match(/^Cached:\s+(\d+)/m)?.[1] ?? '0', 10) || 0;
+				availableKB = free + buffers + cached;
+			}
+			if (totalKB > 0) {
+				return toRam(Math.max(0, totalKB - availableKB) * 1024, totalKB * 1024);
+			}
+		} catch {
+			/* fall through to node:os */
+		}
+	}
+
+	const total = totalmem();
+	const free = freemem();
+	return toRam(Math.max(0, total - free), total);
+}
+
+// ── GPU ──────────────────────────────────────────────────────────────────
+
+async function getGPU(): Promise<Gpu> {
+	const zero: Gpu = { percent: 0, mem: '0', total: '0' };
+
+	// NVIDIA — every platform
+	const nvidia = await run('nvidia-smi', [
+		'--query-gpu=utilization.gpu,memory.used,memory.total',
+		'--format=csv,noheader,nounits'
+	]);
+	if (nvidia) {
+		const parts = nvidia.split(',').map((part) => part.trim());
+		if (parts.length === 3 && !isNaN(parseInt(parts[0], 10))) {
+			return { percent: parseInt(parts[0], 10) || 0, mem: parts[1] || '0', total: parts[2] || '0' };
+		}
+	}
+
+	if (platformName === 'darwin') {
+		const sp = await run('system_profiler', ['SPDisplaysDataType']);
+		const chipset = sp.match(/Chipset Model:\s*(.+)/);
+		if (chipset) {
+			const name = chipset[1].trim();
+			return { percent: 0, mem: name, total: name };
+		}
+		return zero;
+	}
+
+	if (platformName === 'linux') {
+		// AMD
+		const rocm = await run('rocm-smi', ['--showuse', '--json']);
+		if (rocm) {
+			try {
+				const parsed = JSON.parse(rocm) as Record<string, Record<string, string>>;
+				const card = Object.keys(parsed).find((key) => key.startsWith('card'));
+				if (card) {
+					return {
+						percent: parseInt(parsed[card]['GPU use (%)'] ?? '0', 10) || 0,
+						mem: parsed[card]['GPU Memory Used (VRAM MB)'] ?? '0',
+						total: parsed[card]['GPU Memory Total (VRAM MB)'] ?? '0'
+					};
+				}
+			} catch {
+				/* unparseable — fall through */
+			}
+		}
+
+		// Intel iGPU — sysfs read, no spawn
+		try {
+			const freq = await readFile('/sys/class/drm/card0/gt_total_freq/MHz', 'utf-8');
+			if (parseInt(freq.trim(), 10) > 0) return zero;
+		} catch {
+			/* not present */
+		}
+
+		// Last resort: GL renderer string
+		const glx = await run('glxinfo', []);
+		const renderer = glx.match(/OpenGL renderer:\s*(.+)/i);
+		if (renderer) return { percent: 0, mem: '0', total: renderer[1].trim() };
+	}
+
+	return zero;
+}
+
+// ── uptime ───────────────────────────────────────────────────────────────
+
 function formatUptime(ms: number): string {
-  const days = Math.floor(ms / 86400000);
-  const hours = Math.floor((ms % 86400000) / 3600000);
-  const mins = Math.floor((ms % 3600000) / 60000);
-  if (days > 0) return `${days}d ${hours}h ${mins}m`;
-  if (hours > 0 || days === 0 && hours > 0) return `${hours}h ${mins}m`;
-  return `${mins}m`;
+	const days = Math.floor(ms / 86400000);
+	const hours = Math.floor((ms % 86400000) / 3600000);
+	const mins = Math.floor((ms % 3600000) / 60000);
+	if (days > 0) return `${days}d ${hours}h ${mins}m`;
+	if (hours > 0) return `${hours}h ${mins}m`;
+	return `${mins}m`;
 }
 
-function getUptime(): string {
-  // ── Windows: LastBootUpTime from CIM ─────────────────────────────
-  if (os === 'win32') {
-    try {
-      const raw = ps('Get-CimInstance Win32_OperatingSystem | Select-Object -ExpandProperty LastBootUpTime');
-      if (!raw) return '?';
-      const bootTime = new Date(raw);
-      if (isNaN(bootTime.getTime())) return '?';
-      return formatUptime(Date.now() - bootTime.getTime());
-    } catch {
-      // Fallback: parse system up time from WMIC
-      try {
-        const wmicRaw = sh('wmic os get LastBootUpTime 2>nul');
-        const dateStr = wmicRaw.split('\n').filter(l => l.match(/^\d{8}/))?.[0]?.trim();
-        if (dateStr) return formatUptime(Date.now() - new Date(dateStr).getTime());
-      } catch { /* ignore */ }
-    }
-  }
+async function getUptime(): Promise<string> {
+	// node:os covers every platform — no shell needed (M2/M3).
+	const seconds = uptime();
+	if (seconds > 0) return formatUptime(seconds * 1000);
 
-  // ── macOS: sysctl kern.boottime with vm_stat fallback ────────────
-  if (os === 'darwin') {
-    try {
-      const raw = sh('sysctl kern.boottime');
-      const secMatch = raw.match(/sec\s*=\s*(\d+)/);
-      if (secMatch) {
-        return formatUptime(Date.now() - parseInt(secMatch[1]) * 1000);
-      }
-    } catch { /* ignore */ }
+	// Windows fallback: last boot time from CIM
+	if (platformName === 'win32') {
+		const raw = await ps(
+			'Get-CimInstance Win32_OperatingSystem | Select-Object -ExpandProperty LastBootUpTime'
+		);
+		if (raw) {
+			const boot = new Date(raw);
+			if (!isNaN(boot.getTime())) return formatUptime(Date.now() - boot.getTime());
+		}
+	}
 
-    // Fallback: Node's os.uptime()
-    const nodeUp = require('os').uptime();
-    if (nodeUp > 0) return formatUptime(nodeUp * 1000);
-  }
+	// Linux/macOS fallback: boot time from `uptime -s`
+	const bootStr = await run('uptime', ['-s']);
+	if (bootStr) {
+		const diff = Date.now() - new Date(bootStr).getTime();
+		if (diff > 0 && !isNaN(diff)) return formatUptime(diff);
+	}
 
-  // ── Linux: uptime -s → boot time, then raw uptime as fallback ───
-  try {
-    const bootStr = sh('uptime -s');
-    if (bootStr) {
-      const diff = Date.now() - new Date(bootStr).getTime();
-      if (diff > 0 && !isNaN(diff)) return formatUptime(diff);
-    }
-  } catch { /* ignore */ }
-
-  // Fallback: parse raw "uptime" output for various formats
-  const raw = sh('uptime');
-  // Format A: "up 3 days, 2:15, ..."
-  let match = raw.match(/up\s+(\d+)\s+day/i);
-  if (match) {
-    const rest = raw.split(match[0])[1] || '';
-    const timeMatch = rest.match(/(\d+):(\d+)/);
-    if (timeMatch) return `${match[1]}d ${timeMatch[1]}h ${timeMatch[2]}m`;
-  }
-  // Format B: "up 2:15, ..." (no days)
-  match = raw.match(/up\s+(\d+):(\d+)/);
-  if (match) return `${parseInt(match[1])}h ${match[2]}m`;
-  // Format C: "up X min" or "up just now"
-  match = raw.match(/up\s+([\d]+)\s+min/);
-  if (match) return `${match[1]}m`;
-
-  // Final fallback: Node's os.uptime()
-  const nodeUp = require('os').uptime();
-  if (nodeUp > 0) return formatUptime(nodeUp * 1000);
-
-  return '?';
+	return '?';
 }
 
-// ── Handler ──────────────────────────────────────────────────────────
+// ── handler ──────────────────────────────────────────────────────────────
 
-export const GET: RequestHandler = async () => {
-  const fallback = {
-    cpu: 0,
-    ram: { percent: 0, used: '0', total: '0' },
-    gpu: { percent: 0, mem: '0', total: '0' },
-    uptime: '?'
-  };
+let cache: { at: number; value: Stats } | null = null;
+let inflight: Promise<Stats> | null = null;
 
-  try {
-    const cpu = getCPU();
-    const ram = getRAM();
-    const gpu = getGPU();
-    const uptime = getUptime();
+async function collect(): Promise<Stats> {
+	const [cpu, ram, gpu, up] = await Promise.all([getCPU(), getRAM(), getGPU(), getUptime()]);
+	return { cpu, ram, gpu, uptime: up };
+}
 
-    return json({ cpu, ram, gpu, uptime });
-  } catch (err) {
-    console.error('Stats error:', err);
-    return json(fallback);
-  }
+export const GET: RequestHandler = async ({ request }) => {
+	const denied = assertApiRequest(request);
+	if (denied) return denied;
+
+	const now = Date.now();
+	if (cache && now - cache.at < CACHE_MS) return json(cache.value);
+
+	if (!inflight) {
+		inflight = collect()
+			.then((value) => {
+				cache = { at: Date.now(), value };
+				return value;
+			})
+			.catch((err) => {
+				console.error('Stats error:', err instanceof Error ? err.message : 'unknown error');
+				return cache?.value ?? FALLBACK;
+			})
+			.finally(() => {
+				inflight = null;
+			});
+	}
+
+	return json(await inflight);
 };
