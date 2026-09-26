@@ -4,6 +4,18 @@
 > **Status:** Architecture Design (v1.0)
 > **Date:** August 2026
 
+> **Read this first — what is spec vs. what is built.** This document is the
+> *design target*. Sections marked **[PLANNED — NOT BUILT]** describe
+> components that do not exist in this repo yet: the WebSocket bridge on
+> port 8742, the Electron shell, the 8-state machine, the audio-reactive
+> pipeline, and the Hermes agent integration (skills, memory, sessions — the
+> chat route sends a stateless message list to an OpenAI-compatible provider).
+> What actually runs today is a SvelteKit app whose
+> `frontend/src/routes/api/*` server routes talk straight to the LLM
+> provider and to Piper TTS — the integration layer the bridge was going to
+> provide. See **[ADR-0001 — Use SvelteKit Routes as the Bridge](docs/adr/0001-use-sveltekit-routes-as-the-bridge.md)**
+> for the decision, and `README.md` for the system as built.
+
 ---
 
 ## 1. Vision
@@ -19,6 +31,12 @@ Glob Interface is a locally-hosted, visually reactive **neural electric globe** 
 ---
 
 ## 2. Architecture Overview
+
+> **[PLANNED — NOT BUILT]** This is the target architecture from the original
+> design. The bridge server (:8742), the WebSocket client, and the Electron
+> window shown below do not exist. The system as built is: browser →
+> SvelteKit `/api/*` server routes (`frontend/src/routes/api/`) → LLM provider
+> / Piper. See [ADR-0001](docs/adr/0001-use-sveltekit-routes-as-the-bridge.md).
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -121,6 +139,10 @@ The glob is **not a solid sphere**. It looks like **electric neurons in a glob f
 
 ## 4. Color System (Color-Shifting Based on Mood/Context)
 
+> **[PARTIALLY BUILT]** Implemented today: amber nodes while speaking and a
+> bloom pulse while thinking (`NeuralGlobe.svelte`). There is no LISTENING or
+> ERROR visual, and no mood drift.
+
 The glob changes color based on its current state and the emotion of the conversation. The color shifts are smooth (500ms lerp between states).
 
 | State | Color | Feeling |
@@ -139,6 +161,11 @@ The entire neural network shifts together — connections, sparks, and core all 
 ---
 
 ## 5. State Machine
+
+> **[PLANNED — NOT BUILT]** The code has two booleans (`isSpeaking`,
+> `isThinking`) in `NeuralGlobe.svelte` and two visual treatments — not this
+> 8-state machine, and no LISTENING or ERROR state (so the "Error red flash"
+> row below cannot trigger as written). Kept as the design target.
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -215,9 +242,15 @@ What makes the glob feel like a living organism, not a UI element:
 | **Browser Web Speech API** | Zero setup, instant | Robotic quality, limited voices |
 | **Frontend ElevenLabs** | Premium quality | Requires API key, paid |
 
-**Recommended:** Hermes TTS via bridge — Edge TTS is free and sounds great.
+**Shipped:** **Piper TTS** runs locally inside the SvelteKit TTS route
+(`frontend/src/routes/api/tts/+server.ts`) — no bridge, no Edge TTS. The table
+above is an options comparison from the original design, not a description of
+what is installed.
 
 ### Audio-Reactive Animation Pipeline
+
+> **[PLANNED — NOT BUILT]** Playback today is a plain `Audio` blob with no
+> WebAudio graph and no AnalyserNode, so none of this pipeline exists yet.
 
 ```
 TTS Audio Stream (from bridge)
@@ -314,6 +347,13 @@ stt:
 
 ## 9. Bridge Server
 
+> **[PLANNED — NOT BUILT]** There is no `bridge/` directory and no reference
+> to WebSocket / :8742 / `ws://` anywhere in `frontend/src`. SvelteKit
+> `/api/*` server routes fulfil the HTTP parts of this role today (chat, TTS,
+> settings, health); the WebSocket protocol below is deferred until streaming
+> audio chunks need it. Decision: [ADR-0001 — Use SvelteKit Routes as the
+> Bridge](docs/adr/0001-use-sveltekit-routes-as-the-bridge.md).
+
 ### Why a Bridge?
 
 The browser can't directly call Hermes API Server due to:
@@ -344,6 +384,11 @@ Bridge Server (port 8742)
 ---
 
 ## 10. Desktop: Transparent Window
+
+> **[PLANNED — NOT BUILT]** No `frontend/electron/` directory exists; the app
+> runs in a browser tab today. The renderer is also created with
+> `alpha: false` and an opaque black scene background, which a transparent
+> window would need to change.
 
 ### Electron Configuration
 
@@ -384,6 +429,10 @@ new BrowserWindow({
 ---
 
 ## 11. Complete Interaction Cycle
+
+> **[PLANNED — NOT BUILT]** This cycle assumes the bridge WebSocket from §9
+> and Edge TTS. What ships today: `fetch('/api/chat')` with SSE streaming and
+> `fetch('/api/tts')` (Piper), with no WS state/emotion messages.
 
 ```
 1. IDLE STATE
@@ -441,16 +490,16 @@ new BrowserWindow({
 
 | Layer | Technology | Why |
 |-------|-----------|-----|
-| **Window** | Electron | Transparent, frameless, always-on-top, cross-platform |
+| **Window** | Electron | **[PLANNED — NOT BUILT]** the app runs in a browser tab today |
 | **Frontend Framework** | SvelteKit + Vite | Fast dev, small bundle, great reactivity |
 | **3D Engine** | Three.js + custom GLSL shaders | Mature, well-documented, GPU-accelerated |
 | **Post-processing** | UnrealBloomPass | Electric glow effect |
 | **Audio Analysis** | Web Audio API | Built into browser, no deps |
 | **STT (primary)** | Web Speech API | Zero setup, instant |
 | **STT (alt)** | Hermes faster-whisper | Better accuracy, multi-language |
-| **TTS** | Hermes Edge TTS | Free, high quality, many voices |
-| **Bridge Server** | Node.js + ws | Fast WebSocket, streams well |
-| **AI Brain** | Hermes Agent API Server | Full agent capabilities, streaming |
+| **TTS** | Piper (shipped) | Local voice model, no API key — replaces the planned Hermes Edge TTS |
+| **Bridge Server** | Node.js + ws | **[PLANNED — NOT BUILT]** deferred; SvelteKit `/api/*` routes stand in — see [ADR-0001](docs/adr/0001-use-sveltekit-routes-as-the-bridge.md) |
+| **AI Brain** | Hermes Agent API Server | **[NOT WIRED YET]** the chat route posts to an OpenAI-compatible `/chat/completions`; no session, history, or tools in the loop |
 | **LLM Backend** | LM Studio (localhost:1234) | Local, private, fast |
 | **GPU** | RTX 5060 Ti 16GB | Local inference via LM Studio |
 
@@ -458,8 +507,17 @@ new BrowserWindow({
 
 ## 13. Project Structure
 
+> **[PLANNED — NOT BUILT]** This is the target tree from the original design.
+> Most entries below do not exist yet: no `NodeCloud.svelte` / other
+> per-element `.svelte` files (the glob is `.ts` modules under `lib/glob/`),
+> no `lib/voice/`, no `lib/ws/`, no `stores/`, no `bridge/`, no root
+> `shaders/`, no `config/`, no `scripts/`, no `ARCHITECTURE.md`, no
+> `frontend/electron/`. The tree that actually exists is in
+> [README.md](README.md) under *Project Structure*. Deferred parts are
+> governed by [ADR-0001](docs/adr/0001-use-sveltekit-routes-as-the-bridge.md).
+
 ```
-theglob/
+theglobe/
 ├── frontend/                    # Browser app (Electron)
 │   ├── src/
 │   │   ├── lib/
@@ -562,7 +620,7 @@ theglob/
 | Component | Target | Notes |
 |-----------|--------|-------|
 | **3D Render** | 60fps | Use instanced rendering, limit draw calls |
-| **Node count** | 200-500 | Enough for density, light enough for 60fps |
+| **Node count** | 200-500 | Target; the shipped build uses **680** (`nodes.ts`: 18 clusters × 35 + 50 core) |
 | **Active connections** | 100-200 | Dynamic, constantly evolving |
 | **Concurrent sparks** | 5-20 | Not too many, each is bright |
 | **Bloom passes** | 1 | Quality bloom, single pass |
@@ -584,23 +642,23 @@ theglob/
 - Idle breathing animation
 - No backend, no voice — just a beautiful orb
 
-### Phase 2: Text Chat (Week 2)
-- Bridge server with Hermes API connection
+### Phase 2: Text Chat (Week 2) — ✅ shipped via SvelteKit `/api/chat` (no bridge)
+- ~~Bridge server with Hermes API connection~~ → served by `frontend/src/routes/api/chat/+server.ts` (streaming SSE, multi-provider)
 - Text input field + chat history display
 - Streaming text display
 - Basic state transitions (idle → thinking → speaking → idle)
 
-### Phase 3: Voice Input (Week 3)
+### Phase 3: Voice Input (Week 3) — ✅ shipped (Web Speech API, Chrome/Edge only)
 - Web Speech API integration
 - Microphone button + real-time transcription
-- Listening state animation
+- ~~Listening state animation~~ (not built — no LISTENING visual yet)
 - Text + voice dual input
 
-### Phase 4: Voice Output (Week 4)
-- Hermes TTS integration via bridge
-- Audio playback with WebAudio analysis
-- Audio-reactive animation driving
-- Speaking state animation
+### Phase 4: Voice Output (Week 4) — ✅ shipped with Piper TTS (audio-reactive animation not built)
+- ~~Hermes TTS integration via bridge~~ → Piper via `frontend/src/routes/api/tts/+server.ts`
+- Audio playback (plain `Audio` element; WebAudio analysis not built)
+- ~~Audio-reactive animation driving~~ (not built — playback is a plain `Audio` element)
+- Speaking state animation (amber nodes)
 
 ### Phase 5: Polish (Week 5)
 - Emotion mapping from response content

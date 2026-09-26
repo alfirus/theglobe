@@ -19,7 +19,7 @@
 │                                                  │
 │   2. SHIELA builds                               │
 │      └── Implements the plan                     │
-│      └── Commits to theglob repo                 │
+│      └── Commits to the theglobe repo            │
 │                                                  │
 │   3. MAISARAH reviews                            │
 │      └── Reads BLUEPRINT.md (the spec)           │
@@ -46,9 +46,13 @@
 
 ## How to Invoke Each Agent
 
+Paths below use `<repo>` for your local clone of `github.com/alfirus/theglobe`
+(e.g. `C:\Users\<you>\theglobe`) — substitute your own path; never commit
+machine-specific paths to this file.
+
 ### Sofia → Shiela (build/fix)
 ```bash
-hermes chat -p shiela -q "Implement the following task in C:\Users\alfir\theglob:
+hermes chat -p shiela -q "Implement the following task in <repo>:
 
 [Detailed plan]
 
@@ -57,15 +61,14 @@ After implementation, verify with: [verification command]"
 
 ### Sofia → Maisarah (review)
 ```bash
-hermes chat -p maisarah -q "Review the theglob project at C:\Users\alfir\theglob.
-
-Load the review skill first: skill_view(name='theglob-review')
+hermes chat -p maisarah -q "Review the theglobe project at <repo>.
 
 Then follow the review process:
 1. Read BLUEPRINT.md (the spec)
-2. Read all source files in frontend/src/ and bridge/src/
+2. Read all source files in frontend/src/ (server routes live in
+   frontend/src/routes/api/ — there is no bridge/ directory)
 3. Check against the QA checklist
-4. Write findings to C:\Users\alfir\theglob\REVIEW.md
+4. Append the findings to <repo>/REVIEW.md
 5. Report summary to Sofia via chat"
 ```
 
@@ -76,7 +79,7 @@ Then follow the review process:
 
 ### Sofia → Shiela (fix)
 ```bash
-hermes chat -p shiela -q "Fix the following issues found in review at C:\Users\alfir\theglob:
+hermes chat -p shiela -q "Fix the following issues found in review at <repo>:
 
 [Filtered list of issues from REVIEW.md]
 
@@ -98,4 +101,4 @@ For each fix:
 
 - **Maisarah → Sofia**: Chat summary + REVIEW.md file
 - **Sofia → Shiela**: Filtered review + specific fix instructions
-- **All agents**: Use theglob repo for code, REVIEW.md for tracking
+- **All agents**: Use the theglobe repo for code, REVIEW.md for tracking
