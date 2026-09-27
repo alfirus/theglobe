@@ -97,7 +97,7 @@
 </script>
 
 <div class="message {message.role}">
-  <span class="role">{message.role === 'user' ? 'You' : 'Glob'}</span>
+  <span class="role">{message.role === 'user' ? 'You' : 'Globe'}</span>
   {#if message.role === 'assistant'}
     <div class="text markdown-content">{@html renderMarkdown(message.text)}</div>
   {:else}

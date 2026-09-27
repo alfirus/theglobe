@@ -80,7 +80,7 @@
 		{#each messages as msg, i (msg.id ?? i)}
 			<article class="turn {msg.role}">
 				<div class="turn-head">
-					<span class="role">{msg.role === 'user' ? 'YOU' : 'THE GLOB'}</span>
+					<span class="role">{msg.role === 'user' ? 'YOU' : 'THE GLOBE'}</span>
 					<span class="ts">{fmt(msg.ts)}</span>
 				</div>
 				<div class="rule"></div>
@@ -214,12 +214,15 @@
 		color: var(--hud-cyan);
 	}
 
+	/* Live-state dots stay coloured only on the LISTENING/THINKING/SPEAKING
+	 * chips (owner carve-out). Everywhere else — including this pulse — the dot
+	 * is an icon and is plain white. */
 	.pulse {
 		width: 6px;
 		height: 6px;
 		border-radius: 50%;
-		background: var(--hud-cyan);
-		box-shadow: 0 0 8px var(--hud-cyan);
+		background: #ffffff;
+		box-shadow: 0 0 8px rgba(255, 255, 255, 0.9);
 		animation: live 2s ease-in-out infinite;
 	}
 
@@ -401,13 +404,14 @@
 		width: 7px;
 		height: 7px;
 		border-radius: 50%;
-		background: var(--hud-gold);
-		box-shadow: 0 0 10px var(--hud-gold);
+		/* Thinking/streaming indicator → plain white; the label carries the state */
+		background: #ffffff;
+		box-shadow: 0 0 10px rgba(255, 255, 255, 0.9);
 		animation: live 1s ease-in-out infinite;
 	}
 	.status-dot.streaming {
-		background: var(--hud-cyan);
-		box-shadow: 0 0 10px var(--hud-cyan);
+		background: #ffffff;
+		box-shadow: 0 0 10px rgba(255, 255, 255, 0.9);
 	}
 
 	.status-label {
@@ -453,7 +457,8 @@
 	.stop-glyph {
 		width: 8px;
 		height: 8px;
-		background: var(--hud-red);
+		/* Stop glyph is an icon → plain white; the red border/text stay the signal */
+		background: #ffffff;
 	}
 
 	@media (max-width: 980px) {

@@ -65,11 +65,11 @@
 	<div class="identity">
 		<span class="mark" aria-hidden="true">
 			<svg viewBox="0 0 24 24" width="22" height="22">
-				<circle cx="12" cy="12" r="9.5" fill="none" stroke="currentColor" stroke-width="1" />
+				<circle cx="12" cy="12" r="9.5" fill="none" stroke="currentColor" stroke-width="1.6" />
 				<circle cx="12" cy="12" r="3" fill="currentColor" />
 			</svg>
 		</span>
-		<span class="wordmark">THE GLOB</span>
+		<span class="wordmark">THE GLOBE</span>
 		<span class="direction">VISOR · HUD</span>
 	</div>
 
@@ -143,10 +143,11 @@
 		flex-shrink: 0;
 	}
 
+	/* The identity mark is an icon → plain white, like every other glyph */
 	.mark {
-		color: var(--hud-cyan);
+		color: #ffffff;
 		display: flex;
-		filter: drop-shadow(0 0 4px rgba(125, 249, 255, 0.6));
+		filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.55));
 	}
 
 	.wordmark {
@@ -237,8 +238,8 @@
 		width: 5px;
 		height: 5px;
 		border-radius: 50%;
-		background: var(--hud-green);
-		box-shadow: 0 0 6px var(--hud-green);
+		background: #ffffff;
+		box-shadow: 0 0 6px rgba(255, 255, 255, 0.9);
 	}
 
 	.chips {
@@ -336,6 +337,8 @@
 
 	.gear {
 		display: flex;
+		/* The gear is an icon → plain white (text stays gold, per palette) */
+		color: #ffffff;
 	}
 
 	.glyph {

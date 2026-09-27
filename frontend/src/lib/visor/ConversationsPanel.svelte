@@ -49,11 +49,19 @@
 		<header class="head">
 			<span class="title">CONVERSATIONS</span>
 			<span class="count">{conversations.length}</span>
-			<button class="close" onclick={onclose} title="Close (⌘1)">×</button>
+			<button class="close" onclick={onclose} title="Close (⌘1)" aria-label="Close conversations">
+				<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6">
+					<path d="M6 6l12 12M18 6L6 18"></path>
+				</svg>
+			</button>
 		</header>
 
 		<button class="new" onclick={onnew}>
-			<span aria-hidden="true">+</span>
+			<span class="new-mark" aria-hidden="true">
+				<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6">
+					<path d="M12 5v14M5 12h14"></path>
+				</svg>
+			</span>
 			New thread
 		</button>
 
@@ -81,7 +89,9 @@
 						onclick={() => ondelete(conv.id)}
 						aria-label="Delete {conv.title}"
 					>
-						×
+						<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6">
+							<path d="M6 6l12 12M18 6L6 18"></path>
+						</svg>
 					</button>
 				</li>
 			{/each}
@@ -159,16 +169,23 @@
 		background: transparent;
 		border: 1px solid var(--hud-line);
 		border-radius: var(--r-sm);
-		color: var(--hud-steel);
-		font-size: 15px;
+		/* Close X is an icon → plain white */
+		color: #ffffff;
+		display: flex;
+		align-items: center;
+		justify-content: center;
 		line-height: 1;
 		width: 22px;
 		height: 22px;
+		padding: 0;
 		cursor: pointer;
+		transition:
+			border-color 0.2s ease,
+			background 0.2s ease;
 	}
 	.close:hover {
-		color: var(--hud-cyan);
 		border-color: var(--hud-line-strong);
+		background: rgba(125, 249, 255, 0.08);
 	}
 
 	.new {
@@ -191,6 +208,12 @@
 	}
 	.new:hover {
 		background: rgba(255, 193, 77, 0.1);
+	}
+
+	.new-mark {
+		display: flex;
+		/* The plus is an icon → plain white (the label stays gold, per palette) */
+		color: #ffffff;
 	}
 
 	.list {
@@ -267,17 +290,22 @@
 		width: 22px;
 		height: 22px;
 		flex-shrink: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0;
 		background: transparent;
 		border: 1px solid transparent;
 		border-radius: var(--r-sm);
-		color: var(--hud-steel);
-		font-size: 14px;
-		line-height: 1;
+		/* Delete X is an icon → plain white; the hover glow carries the danger */
+		color: #ffffff;
 		cursor: pointer;
 		opacity: 0.6;
+		transition:
+			opacity 0.2s ease,
+			border-color 0.2s ease;
 	}
 	.del:hover {
-		color: var(--hud-red);
 		border-color: rgba(255, 107, 107, 0.5);
 		opacity: 1;
 	}

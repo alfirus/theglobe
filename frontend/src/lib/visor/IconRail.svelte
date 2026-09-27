@@ -88,7 +88,8 @@
 		background: transparent;
 		border: 1px solid var(--hud-line);
 		border-radius: var(--r-md);
-		color: var(--hud-cyan);
+		/* Rail glyphs are icons → plain white, stroke weight 1.6 */
+		color: #ffffff;
 		cursor: pointer;
 		transition:
 			border-color 0.2s ease,

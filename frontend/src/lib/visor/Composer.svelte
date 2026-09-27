@@ -127,10 +127,12 @@
 		return () => window.removeEventListener('glob:focus-composer', focusFromChrome);
 	});
 
-	const suggestions = [
-		{ label: 'Watch cluster 07', glyph: '◉' },
-		{ label: 'Summarise the last hour', glyph: '↻' },
-		{ label: 'Compare to yesterday', glyph: '▤' }
+	// Quick-action glyphs: inline SVG, one stroke weight, plain white — never
+	// emoji and never a coloured text character (owner icon standard).
+	const suggestions: { label: string; glyph: 'reticle' | 'refresh' | 'rows' }[] = [
+		{ label: 'Watch cluster 07', glyph: 'reticle' },
+		{ label: 'Summarise the last hour', glyph: 'refresh' },
+		{ label: 'Compare to yesterday', glyph: 'rows' }
 	];
 </script>
 
@@ -138,7 +140,20 @@
 	<div class="suggestions">
 		{#each suggestions as suggestion (suggestion.label)}
 			<button class="chip" onclick={() => applySuggestion(suggestion.label)} {disabled}>
-				<span class="chip-glyph" aria-hidden="true">{suggestion.glyph}</span>
+				<span class="chip-glyph" aria-hidden="true">
+					<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6">
+						{#if suggestion.glyph === 'reticle'}
+							<circle cx="12" cy="12" r="7.5"></circle>
+							<circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"></circle>
+						{:else if suggestion.glyph === 'refresh'}
+							<path d="M20 12a8 8 0 1 1-2.5-5.8"></path>
+							<path d="M20 4.5V10h-5.4"></path>
+						{:else}
+							<rect x="4" y="5.5" width="16" height="5"></rect>
+							<rect x="4" y="13.5" width="16" height="5"></rect>
+						{/if}
+					</svg>
+				</span>
 				{suggestion.label}
 			</button>
 		{/each}
@@ -162,7 +177,7 @@
 				title={isListening ? 'Stop listening' : 'Voice input'}
 				aria-label={isListening ? 'Stop listening' : 'Voice input'}
 			>
-				<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7">
+				<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6">
 					<rect x="9" y="3" width="6" height="11" rx="3"></rect>
 					<path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path>
 				</svg>
@@ -182,13 +197,13 @@
 				onfocuschange(false);
 			}}
 			type="text"
-			placeholder={isListening ? 'Listening…' : 'Message the Glob'}
-			aria-label="Message the Glob"
+			placeholder={isListening ? 'Listening…' : 'Message the Globe'}
+			aria-label="Message the Globe"
 			disabled={disabled}
 		/>
 
 		<button class="send" onclick={submit} disabled={disabled || !input.trim()} title="Send">
-			<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+			<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6">
 				<path d="M12 19V5M6 11l6-6 6 6"></path>
 			</svg>
 		</button>
@@ -251,7 +266,9 @@
 		cursor: default;
 	}
 	.chip-glyph {
-		color: var(--hud-gold);
+		display: flex;
+		/* Chip glyphs are icons → plain white (the chip label keeps its colour) */
+		color: #ffffff;
 		font-size: 11px;
 	}
 
@@ -311,7 +328,9 @@
 		background: transparent;
 		border: 1px solid var(--hud-line);
 		border-radius: var(--r-full);
-		color: var(--hud-cyan);
+		/* The mic glyph stays plain white in every state; the border carries
+		 * the recording signal (owner icon standard). */
+		color: #ffffff;
 		cursor: pointer;
 		flex-shrink: 0;
 		transition:
@@ -322,7 +341,6 @@
 		border-color: var(--hud-line-strong);
 	}
 	.mic.recording {
-		color: var(--hud-red);
 		border-color: rgba(255, 107, 107, 0.6);
 		animation: mic-pulse 1.5s ease-in-out infinite;
 	}
@@ -364,7 +382,8 @@
 		background: transparent;
 		border: 1px solid var(--hud-line-gold);
 		border-radius: var(--r-full);
-		color: var(--hud-gold);
+		/* Send arrow is an icon → plain white; the gold ring marks it as the action */
+		color: #ffffff;
 		cursor: pointer;
 		flex-shrink: 0;
 		transition:

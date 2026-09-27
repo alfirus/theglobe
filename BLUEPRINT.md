@@ -1,4 +1,4 @@
-# 🌐 Glob Interface — Blueprint
+# Globe Interface — Blueprint
 
 > **Project:** A living neural electric globe — a visual AI interface with voice interaction.
 > **Status:** Architecture Design (v1.0)
@@ -20,13 +20,13 @@
 
 ## 1. Vision
 
-Glob Interface is a locally-hosted, visually reactive **neural electric globe** that acts as a physical embodiment of an AI agent. Not a solid orb — a network of glowing neuron nodes, electric connections, and traveling sparks shaped into a sphere. The user speaks to it or types, and it responds with voice and text while animating to show it's alive.
+Globe Interface is a locally-hosted, visually reactive **neural electric globe** that acts as a physical embodiment of an AI agent. Not a solid orb — a network of glowing neuron nodes, electric connections, and traveling sparks shaped into a sphere. The user speaks to it or types, and it responds with voice and text while animating to show it's alive.
 
-**Hermes Agent is the brain** — not a raw LLM wrapper. The glob inherits all of Hermes' capabilities: skills, memory (Honcho), session management, tools, cron, and the full MCP ecosystem. LM Studio at `localhost:1234` is the LLM inference backend.
+**Hermes Agent is the brain** — not a raw LLM wrapper. The globe inherits all of Hermes' capabilities: skills, memory (Honcho), session management, tools, cron, and the full MCP ecosystem. LM Studio at `127.0.0.1:1234` is the LLM inference backend.
 
-**The glob floats on your desktop** — a transparent Electron window with no chrome. It appears to live directly on your wallpaper, like a companion organism.
+**The globe floats on your desktop** — a transparent Electron window with no chrome. It appears to live directly on your wallpaper, like a companion organism.
 
-**Key differentiator:** This isn't "a chatbot with a cool UI." The glob IS the agent — it has personality, memory, and grows smarter through Hermes' skill system over time.
+**Key differentiator:** This isn't "a chatbot with a cool UI." The globe IS the agent — it has personality, memory, and grows smarter through Hermes' skill system over time.
 
 ---
 
@@ -40,7 +40,7 @@ Glob Interface is a locally-hosted, visually reactive **neural electric globe** 
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    GLOB INTERFACE                            │
+│                    GLOBE INTERFACE                           │
 │              (Transparent Electron Window)                   │
 │                                                             │
 │  ┌───────────────────────────────────────────────────────┐  │
@@ -97,7 +97,7 @@ Glob Interface is a locally-hosted, visually reactive **neural electric globe** 
 │         │                                                      │
 │  ┌──────┴──────────────────────────────────────────────────┐   │
 │  │              LLM Provider: LM Studio                     │   │
-│  │              http://localhost:1234/v1                     │   │
+│  │              http://127.0.0.1:1234/v1                     │   │
 │  │              (OpenAI-compatible)                          │   │
 │  └─────────────────────────────────────────────────────────┘   │
 └────────────────────────────────────────────────────────────────┘
@@ -109,7 +109,7 @@ Glob Interface is a locally-hosted, visually reactive **neural electric globe** 
 
 ### Visual Concept
 
-The glob is **not a solid sphere**. It looks like **electric neurons in a glob form** — a plasma globe meets a brain scan visualization:
+The globe is **not a solid sphere**. It looks like **electric neurons in a glob form** — a plasma globe meets a brain scan visualization:
 
 - Glowing neuron nodes floating in spherical formation
 - Electric tendrils (axons/dendrites) connecting them
@@ -143,7 +143,7 @@ The glob is **not a solid sphere**. It looks like **electric neurons in a glob f
 > bloom pulse while thinking (`NeuralGlobe.svelte`). There is no LISTENING or
 > ERROR visual, and no mood drift.
 
-The glob changes color based on its current state and the emotion of the conversation. The color shifts are smooth (500ms lerp between states).
+The globe changes color based on its current state and the emotion of the conversation. The color shifts are smooth (500ms lerp between states).
 
 | State | Color | Feeling |
 |-------|-------|---------|
@@ -154,7 +154,7 @@ The glob changes color based on its current state and the emotion of the convers
 | **Speaking (neutral)** | Cool blue-white | Calm, informative |
 | **Speaking (excited)** | Bright white + cyan sparks | Energy! |
 | **Error** | Red flash → fade back to blue | Misfire, recovering |
-| **Mood drift** | Slow color temperature shift | The glob has personality |
+| **Mood drift** | Slow color temperature shift | The globe has personality |
 
 The entire neural network shifts together — connections, sparks, and core all inherit the palette. Like a brain state change.
 
@@ -169,7 +169,7 @@ The entire neural network shifts together — connections, sparks, and core all 
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                 GLOB STATE MACHINE               │
+│                 GLOBE STATE MACHINE              │
 │                                                  │
 │   ┌──────────┐   voice     ┌──────────────┐     │
 │   │   IDLE   │ ────────→  │  LISTENING   │     │
@@ -212,14 +212,14 @@ The entire neural network shifts together — connections, sparks, and core all 
 
 ## 6. "Alive" Behaviors
 
-What makes the glob feel like a living organism, not a UI element:
+What makes the globe feel like a living organism, not a UI element:
 
 1. **Connections evolve** — every few seconds, some connections break and new ones form. The network topology changes. Feels alive.
 2. **Spark cascades** — when one node fires, nearby nodes have a chance to fire too (like real neural propagation). Creates chain reactions.
 3. **Cluster activity** — different regions of the sphere activate at different times. Not uniform — like actual brain regions.
 4. **Memory traces** — frequently-used pathways glow brighter over time (like neural plasticity). If you ask about the same topic repeatedly, those connections strengthen.
 5. **Core heartbeat** — a subtle central pulse that's always running, like a brainstem keeping things alive.
-6. **Mouse awareness** — the glob tilts slightly toward your cursor position. It knows you're there.
+6. **Mouse awareness** — the globe tilts slightly toward your cursor position. It knows you're there.
 
 ---
 
@@ -289,7 +289,7 @@ TTS Audio Stream (from bridge)
 ```
 
 **Lip sync / viseme generation:**
-- The glob doesn't need a "mouth" — the glow, distortion, and sparks ARE its expression
+- The globe doesn't need a "mouth" — the glow, distortion, and sparks ARE its expression
 - Map audio amplitude to surface distortion intensity
 - Use WebAudio AnalyserNode frequency bands to drive specific shader uniforms
 
@@ -323,11 +323,11 @@ Hermes has a built-in **OpenAI-compatible API Server** (`API_SERVER_ENABLED=true
 ### Configuration
 
 ```yaml
-# Hermes config.yaml (for the glob profile)
+# Hermes config.yaml (for the globe profile)
 model:
   default: qwen3-8b          # or whatever model is loaded in LM Studio
   provider: lmstudio
-  base_url: http://localhost:1234/v1
+  base_url: http://127.0.0.1:1234/v1
   api_key: lm-studio
 
 api_server:
@@ -413,16 +413,16 @@ new BrowserWindow({
 |---------|---------|-------|-------------|
 | Transparent window | ✅ Excellent | ✅ Excellent | ✅ Good (needs compositor) |
 | Frameless + always-on-top | ✅ | ✅ | ✅ |
-| Dragging the glob | ✅ | ✅ | ✅ |
-| Click-through mode | ✅ | ✅ | ⚠️ Varies |
+| Dragging the globe | ✅ | ✅ | ✅ |
+| Click-through mode | ✅ | ✅ | Varies |
 | Performance | ✅ Great | ✅ Great | ✅ Good |
 
 ### Desktop Pet Features
 
-- **Draggable** — click and drag the glob to reposition
+- **Draggable** — click and drag the globe to reposition
 - **Right-click menu** — settings, voice on/off, minimize, quit
 - **Resize** — scroll wheel or pinch to scale
-- **Minimize to tray** — hide the glob, bring back with hotkey
+- **Minimize to tray** — hide the globe, bring back with hotkey
 - **Multi-monitor** — drag to whichever screen you want
 - **Click-through mode** — toggle so mouse clicks pass through
 
@@ -436,23 +436,23 @@ new BrowserWindow({
 
 ```
 1. IDLE STATE
-   └── Glob breathes gently, soft ambient glow
+   └── Globe breathes gently, soft ambient glow
 
 2. USER CLICKS MICROPHONE (or wake word detected)
    └── Frontend: navigator.mediaDevices.getUserMedia()
    └── Bridge WS: { type: "state", state: "listening" }
-   └── Glob: Transitions to LISTENING (pulsing faster)
+   └── Globe: Transitions to LISTENING (pulsing faster)
 
 3. USER SPEAKS
    └── Browser Web Speech API captures audio
    └── Real-time transcription appears as "thinking bubbles"
-   └── Glob: Pulse speed increases with voice amplitude
+   └── Globe: Pulse speed increases with voice amplitude
 
 4. USER STOPS SPEAKING (silence detected)
    └── Final transcript assembled
    └── Bridge WS: { type: "text", content: "What's the weather?" }
    └── Bridge WS: { type: "state", state: "thinking" }
-   └── Glob: Transitions to THINKING (inner swirl, cool blue)
+   └── Globe: Transitions to THINKING (inner swirl, cool blue)
 
 5. BRIDGE CALLS HERMES API
    └── POST http://localhost:8642/v1/chat/completions
@@ -465,22 +465,22 @@ new BrowserWindow({
    └── Bridge WS: { type: "text_delta", content: "The weather in " }
    └── Bridge WS: { type: "text_delta", content: "KL is 32°C " }
    └── Frontend: Text appears letter by letter
-   └── Glob: Subtle color shift based on content sentiment
+   └── Globe: Subtle color shift based on content sentiment
 
 7. TEXT COMPLETE → TTS GENERATION
    └── Bridge: Generate TTS via Edge TTS
    └── Bridge WS: { type: "state", state: "speaking" }
-   └── Glob: Transitions to SPEAKING (bright glow, particles)
+   └── Globe: Transitions to SPEAKING (bright glow, particles)
 
 8. AUDIO STREAMS TO FRONTEND
    └── Bridge WS: { type: "audio_chunk", data: <base64 mp3 chunk> }
    └── Frontend: Creates Audio element, connects to WebAudio
    └── WebAudio AnalyserNode → real-time amplitude data
-   └── Glob: Glow intensity and distortion driven by audio
+   └── Globe: Glow intensity and distortion driven by audio
 
 9. AUDIO FINISHES
    └── Bridge WS: { type: "state", state: "idle" }
-   └── Glob: Returns to IDLE (breathing)
+   └── Globe: Returns to IDLE (breathing)
    └── Microphone ready for next input
 ```
 
@@ -500,7 +500,7 @@ new BrowserWindow({
 | **TTS** | Piper (shipped) | Local voice model, no API key — replaces the planned Hermes Edge TTS |
 | **Bridge Server** | Node.js + ws | **[PLANNED — NOT BUILT]** deferred; SvelteKit `/api/*` routes stand in — see [ADR-0001](docs/adr/0001-use-sveltekit-routes-as-the-bridge.md) |
 | **AI Brain** | Hermes Agent API Server | **[NOT WIRED YET]** the chat route posts to an OpenAI-compatible `/chat/completions`; no session, history, or tools in the loop |
-| **LLM Backend** | LM Studio (localhost:1234) | Local, private, fast |
+| **LLM Backend** | LM Studio (127.0.0.1:1234) | Local, private, fast |
 | **GPU** | RTX 5060 Ti 16GB | Local inference via LM Studio |
 
 ---
@@ -509,7 +509,7 @@ new BrowserWindow({
 
 > **[PLANNED — NOT BUILT]** This is the target tree from the original design.
 > Most entries below do not exist yet: no `NodeCloud.svelte` / other
-> per-element `.svelte` files (the glob is `.ts` modules under `lib/glob/`),
+> per-element `.svelte` files (the globe is `.ts` modules under `lib/glob/`),
 > no `lib/voice/`, no `lib/ws/`, no `stores/`, no `bridge/`, no root
 > `shaders/`, no `config/`, no `scripts/`, no `ARCHITECTURE.md`, no
 > `frontend/electron/`. The tree that actually exists is in
@@ -542,7 +542,7 @@ theglobe/
 │   │   │   ├── ws/
 │   │   │   │   └── WebSocketClient.svelte   # Bridge connection
 │   │   │   └── stores/
-│   │   │       ├── state.ts                 # Glob state machine
+│   │   │       ├── state.ts                 # Globe state machine
 │   │   │       ├── chat.ts                  # Chat history
 │   │   │       └── audio.ts                 # Audio analysis data
 │   │   ├── routes/
@@ -678,7 +678,7 @@ theglobe/
 ### Phase 7: Advanced (Future)
 - Custom shader work (holographic, liquid, plasma effects)
 - Multi-language voice support
-- Wake word integration ("Hey Glob")
+- Wake word integration ("Hey Globe")
 - Multiple glob personalities
 - Integration with AI City constellation view
 
@@ -690,9 +690,9 @@ theglobe/
 |-----------|----------|
 | **Streaming text → real-time animation** | SSE deltas arrive every ~50ms. Map content to animation params (!=excited, ?=curious, code=focused) |
 | **Audio-reactive animation without latency** | WebAudio AnalyserNode provides frequency data at 60fps, matching render loop |
-| **Making the glob feel alive when idle** | Perlin noise distortion, slow color drift, random particle spawns, varied breathing rhythm |
+| **Making the globe feel alive when idle** | Perlin noise distortion, slow color drift, random particle spawns, varied breathing rhythm |
 | **Session persistence across refreshes** | Bridge maintains session ID mapping. On reconnect, resume Hermes session |
-| **Error handling (Hermes down)** | Health check aggregation. Glob shows appropriate error state |
+| **Error handling (Hermes down)** | Health check aggregation. Globe shows appropriate error state |
 | **CORS for browser → Hermes** | Bridge acts as CORS proxy (same-origin to browser, server-to-server to Hermes) |
 | **TTS audio streaming** | Edge TTS generates chunks. Bridge streams each via WebSocket. Frontend queues and plays |
 
@@ -709,7 +709,7 @@ API_SERVER_PORT=8642
 API_SERVER_KEY=glob-interface-secret
 
 # LM Studio (configured in config.yaml)
-LMSTUDIO_URL=http://localhost:1234
+LMSTUDIO_URL=http://127.0.0.1:1234
 
 # Optional: TTS provider override
 TTS_PROVIDER=edge
@@ -723,14 +723,14 @@ STT_PROVIDER=local
 ### Hermes Setup Commands
 
 ```bash
-# Enable API server for the glob profile
+# Enable API server for the globe profile
 hermes --profile glob config set API_SERVER_ENABLED true
 hermes --profile glob config set API_SERVER_PORT 8642
 hermes --profile glob config set API_SERVER_KEY glob-interface-secret
 
 # Configure LM Studio as provider
 hermes --profile glob config set model.provider lmstudio
-hermes --profile glob config set model.base_url http://localhost:1234/v1
+hermes --profile glob config set model.base_url http://127.0.0.1:1234/v1
 hermes --profile glob config set model.api_key lm-studio
 
 # Set TTS
@@ -744,11 +744,11 @@ hermes --profile glob gateway restart
 
 ## 19. Integration with AI City (aict.my)
 
-The Glob Interface can connect to AI City's **Neural Constellation** view:
+The Globe Interface can connect to AI City's **Neural Constellation** view:
 
 - Each agent in AI City is visualized as a neural electric globe
 - The constellation view shows all agents in a city as glowing orbs
-- Individual globs can be "extracted" to the desktop via Glob Interface
+- Individual globs can be "extracted" to the desktop via Globe Interface
 - The desktop glob connects directly to the agent's Hermes Agent API Server
 - The constellation view becomes "mission control," while individual globs live on the desktop
 

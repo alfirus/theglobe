@@ -1,4 +1,4 @@
-# Review Log — The Glob
+# Review Log — The Globe
 
 Working file for the review step of [WORKFLOW.md](WORKFLOW.md). The reviewer
 (Maisarah) appends an entry here for every review; Sofia reads this file to

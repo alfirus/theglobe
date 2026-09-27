@@ -473,11 +473,12 @@
       console.error('Chat error:', err);
 
       const aborted = err instanceof DOMException && err.name === 'AbortError';
+      // No emoji in product copy — these land verbatim in the transcript.
       let note: string;
-      if (aborted && stopRequested) note = assistantText ? '' : '⏹ Generation stopped.';
-      else if (aborted && timedOut) note = `⚠️ ${selectedProvider} timed out. Try again.`;
-      else if (aborted) note = '⏹ Generation stopped.';
-      else note = `⚠️ Cannot connect to ${selectedProvider}. Check settings.`;
+      if (aborted && stopRequested) note = assistantText ? '' : 'Generation stopped.';
+      else if (aborted && timedOut) note = `Timed out: ${selectedProvider}. Try again.`;
+      else if (aborted) note = 'Generation stopped.';
+      else note = `Cannot connect to ${selectedProvider}. Check settings.`;
 
       const bubbleText =
         assistantText + (assistantText && note ? `\n\n${note}` : note);
@@ -547,7 +548,7 @@
 </script>
 
 <svelte:head>
-  <title>Glob Interface</title>
+  <title>Globe Interface</title>
   <meta name="description" content="Visor HUD — Neural Globe AI Interface" />
 </svelte:head>
 
@@ -573,7 +574,7 @@
   <Frame />
 
   <footer class="vis-footer">
-    THE GLOB · VISOR HUD · NEURAL PROJECTION · {selectedProvider.toUpperCase()}
+    THE GLOBE · VISOR HUD · NEURAL PROJECTION · {selectedProvider.toUpperCase()}
   </footer>
 
   <TopBar

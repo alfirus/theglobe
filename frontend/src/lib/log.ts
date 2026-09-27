@@ -1,5 +1,5 @@
 /**
- * Structured logging for The Glob — one greppable, machine-parseable line per
+ * Structured logging for The Globe — one greppable, machine-parseable line per
  * event, shared by the browser and the SvelteKit routes (P1-2).
  *
  *   [glob] stream_failed {"ts":"2026-09-27T…Z","scope":"chat","event":"stream_failed","kind":"stream",…}
