@@ -1,16 +1,16 @@
-# 🌐 The Glob
+# The Globe
 
 A living neural electric globe — a visual AI interface with voice interaction.
 
-Not a solid orb. A network of glowing neuron nodes, electric connections, and traveling sparks shaped into a sphere. The glob IS the agent.
+Not a solid orb. A network of glowing neuron nodes, electric connections, and traveling sparks shaped into a sphere. The globe IS the agent.
 
 ## What Is This?
 
-The Glob Interface is a locally-hosted, visually reactive **neural electric globe** that acts as a physical embodiment of an AI agent.
+The Globe Interface is a locally-hosted, visually reactive **neural electric globe** that acts as a physical embodiment of an AI agent.
 
 Today it runs as a **SvelteKit app in your browser** — no desktop shell yet. The floating transparent window (Electron) is planned, not built; see [ADR-0001](docs/adr/0001-use-sveltekit-routes-as-the-bridge.md) and the phase table below.
 
-The LLM calls come from the app's own server routes to an OpenAI-compatible provider (LM Studio at `localhost:1234` by default). The deeper [Hermes Agent](https://hermes-agent.nousresearch.com/) integration — skills, memory, sessions, tools — is the target architecture: the chat route currently sends a stateless message list, so no conversation history, session, or tool use reaches the model yet.
+The LLM calls come from the app's own server routes to an OpenAI-compatible provider (LM Studio at `127.0.0.1:1234` by default). The deeper [Hermes Agent](https://hermes-agent.nousresearch.com/) integration — skills, memory, sessions, tools — is the target architecture: the chat route currently sends a stateless message list, so no conversation history, session, or tool use reaches the model yet.
 
 ## ✨ Features
 
@@ -76,7 +76,7 @@ TTS needs a local Piper voice model; provider settings are entered in the in-app
 
 ## 🎨 Visual Design
 
-The glob is **not a solid sphere**. It looks like electric neurons in a glob form:
+The globe is **not a solid sphere**. It looks like electric neurons in a glob form:
 
 - **Nodes** — Sharp bright points (Fibonacci sphere distribution)
 - **Connections** — Dynamic lines between nearby nodes (form/dissolve)
@@ -135,7 +135,7 @@ theglobe/
 - **3D:** Three.js + GLSL shaders
 - **Post-processing:** UnrealBloomPass
 - **API layer:** SvelteKit server routes — no separate bridge process
-- **LLM:** Any OpenAI-compatible provider (LM Studio at `localhost:1234` by default)
+- **LLM:** Any OpenAI-compatible provider (LM Studio at `127.0.0.1:1234` by default)
 - **TTS:** Piper (local voice model)
 - **STT:** Web Speech API (Chrome/Edge)
 - **Storage:** IndexedDB (conversations) + a local provider-settings file
@@ -154,7 +154,7 @@ theglobe/
 
 **Known gaps:** the shipped chat has no multi-turn history and does not send the configured system prompt to the provider. Both are in progress under the current P0 work (`p0-chat-core` / `p0-api-security`) and are **not merged yet** — treat Phases 2–4 as shipped-with-known-gaps, not finished.
 
-## 🤖 Agent Workflow
+## Agent Workflow
 
 - **Sofia** — Plans architecture, evaluates reviews
 - **Shiela** — Implements code

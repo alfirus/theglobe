@@ -10,7 +10,7 @@ const DB_VERSION = 1;
 export interface Conversation {
   id: string;
   title: string;
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  messages: Array<{ role: 'user' | 'assistant'; content: string; ts?: number }>;
   provider: string;
   systemPrompt?: string;
   createdAt: number;

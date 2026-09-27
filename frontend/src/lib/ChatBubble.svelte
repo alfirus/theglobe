@@ -31,10 +31,12 @@
   import { marked } from 'marked';
 
   export type Message = {
-    /** Client-only identity used to target the right bubble while streaming (see +page.svelte). */
-    id?: string;
-    role: 'user' | 'assistant';
-    text: string;
+  	/** Client-only identity used to target the right bubble while streaming (see +page.svelte). */
+  	id?: string;
+  	role: 'user' | 'assistant';
+  	text: string;
+  	/** Client-only timestamp — the Visor HUD prints it in the turn header. */
+  	ts?: number;
   };
 
   let { message }: { message: Message } = $props();
@@ -95,7 +97,7 @@
 </script>
 
 <div class="message {message.role}">
-  <span class="role">{message.role === 'user' ? 'You' : 'Glob'}</span>
+  <span class="role">{message.role === 'user' ? 'You' : 'Globe'}</span>
   {#if message.role === 'assistant'}
     <div class="text markdown-content">{@html renderMarkdown(message.text)}</div>
   {:else}

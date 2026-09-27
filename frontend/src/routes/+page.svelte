@@ -1,15 +1,21 @@
 <script lang="ts">
   import { browser } from '$app/environment';
-  import NeuralGlobe from '$lib/glob/NeuralGlobe.svelte';
-  import ChatInput from '$lib/ChatInput.svelte';
-  import ChatBubble from '$lib/ChatBubble.svelte';
-  import DeviceStats from '$lib/DeviceStats.svelte';
+  import NeuralGlobe, { type GlobeState } from '$lib/glob/NeuralGlobe.svelte';
+  import type { Message } from '$lib/ChatBubble.svelte';
   import Settings from '$lib/Settings.svelte';
   import type { Provider } from '$lib/Settings.svelte';
-  import ConversationSidebar from '$lib/ConversationSidebar.svelte';
-  import type { Message } from '$lib/ChatBubble.svelte';
   import * as db from '$lib/db';
   import { loadEffectiveSettings, readLocalSettings } from '$lib/settingsSync';
+
+  // Visor HUD (Direction B)
+  import Frame from '$lib/visor/Frame.svelte';
+  import LensOverlay from '$lib/visor/LensOverlay.svelte';
+  import TopBar, { type HudState } from '$lib/visor/TopBar.svelte';
+  import IconRail from '$lib/visor/IconRail.svelte';
+  import TelemetryRail, { type GlobeTelemetry } from '$lib/visor/TelemetryRail.svelte';
+  import TranscriptZone from '$lib/visor/TranscriptZone.svelte';
+  import Composer from '$lib/visor/Composer.svelte';
+  import ConversationsPanel from '$lib/visor/ConversationsPanel.svelte';
 
   /**
    * In-memory conversation. Carries `createdAt`/`updatedAt` alongside the
@@ -33,19 +39,52 @@
   // State management for multi-conversation support
   let conversations: Conversation[] = $state([]);
   let activeConversationId: string | null = $state(null);
-  let showInput = $state(false);
   let isThinking = $state(false);
-  let isSpeaking = $state(false);
+  let isStreaming = $state(false); // a reply is arriving chunk by chunk
+  let isSpeaking = $state(false); // TTS playback
   let currentAudio: HTMLAudioElement | null = null;
   let currentAudioUrl: string | null = null;
   let selectedProvider = $state<Provider>(DEFAULT_PROVIDER);
   let systemPrompt = $state('');
+
+  // HUD chrome state
+  let settingsReady = $state(false); // server settings resolved at least once
+  let settingsOpen = $state(false);
+  let conversationsOpen = $state(false);
+  let jumpTick = $state(0);
+  let globeTelemetry = $state<GlobeTelemetry | null>(null);
 
   // In-flight chat request: the controller backs the stop button and the timeout.
   let chatController: AbortController | null = null;
   let chatTimeout: ReturnType<typeof setTimeout> | null = null;
   let stopRequested = false;
   let timedOut = false;
+
+  /**
+   * The chips and the globe both mirror these three real states:
+   * listening (idle / mic live) → thinking (request out, no bytes yet) →
+   * speaking (reply streaming, or TTS playing). Streaming outranks thinking
+   * because `isThinking` stays true for the whole request.
+   */
+  const hudState = $derived<HudState>(
+    isStreaming || isSpeaking ? 'speaking' : isThinking ? 'thinking' : 'listening'
+  );
+  const globeState = $derived<GlobeState>(
+    isStreaming || isSpeaking ? 'speaking' : isThinking ? 'thinking' : 'idle'
+  );
+
+  const activeConversation = $derived(
+    conversations.find((c) => c.id === activeConversationId) ?? null
+  );
+  const activeMessages = $derived(activeConversation?.messages ?? []);
+  const panelConversations = $derived(
+    conversations.map((c) => ({
+      id: c.id,
+      title: c.title,
+      messageCount: c.messages.length,
+      updatedAt: c.updatedAt
+    }))
+  );
 
   /** Accept only real provider ids — a corrupt/garbage value falls back (H4). */
   function normalizeProvider(value: unknown): Provider {
@@ -57,12 +96,13 @@
   function toUiMessages(stored: db.Conversation['messages']): Message[] {
     return stored.map((m) => ({
       role: m.role === 'assistant' ? 'assistant' : 'user',
-      text: m.content
+      text: m.content,
+      ts: typeof m.ts === 'number' ? m.ts : undefined
     }));
   }
 
   function toStoredMessages(messages: Message[]): db.Conversation['messages'] {
-    return messages.map((m) => ({ role: m.role, content: m.text }));
+    return messages.map((m) => ({ role: m.role, content: m.text, ts: m.ts }));
   }
 
   // Load conversations from IndexedDB on mount
@@ -77,6 +117,9 @@
       const settings = await loadEffectiveSettings();
       selectedProvider = normalizeProvider(settings.provider);
       systemPrompt = typeof settings.systemPrompt === 'string' ? settings.systemPrompt : '';
+      // Only now may the telemetry rail probe the active provider — before this
+      // the page still holds the default id, which has no base URL (a 400).
+      settingsReady = true;
 
       const stored = await db.getConversations();
 
@@ -91,15 +134,12 @@
       // Restore active conversation or create new one
       if (stored.length > 0) {
         activeConversationId = stored[0].id;
-        // D4: a restored conversation is exactly as active as a brand-new one.
-        // Without this the input bar stayed hidden after a reload until the
-        // globe was clicked.
-        showInput = true;
       } else {
         await createNewConversation();
       }
     } catch (err) {
       console.error('Failed to load conversations:', err);
+      settingsReady = true;
       await createNewConversation();
     }
   }
@@ -117,7 +157,6 @@
 
     conversations = [newConv, ...conversations];
     activeConversationId = id;
-    showInput = true;
 
     // Save to IndexedDB
     try {
@@ -137,6 +176,7 @@
 
   async function selectConversation(id: string) {
     activeConversationId = id;
+    conversationsOpen = false;
 
     const conv = conversations.find((c) => c.id === id);
     if (conv) {
@@ -165,12 +205,11 @@
       console.warn('Could not load conversation:', err);
     }
 
-    showInput = true;
+    jumpTick++;
   }
 
   async function deleteConversation(id: string) {
     conversations = conversations.filter((c) => c.id !== id);
-
     if (activeConversationId === id) {
       activeConversationId = null;
 
@@ -194,7 +233,6 @@
 
     const conv = conversations.find((c) => c.id === activeConversationId);
     if (!conv) return;
-
     // Auto-generate the title from the first user message. The condition used to
     // be inverted (M9): it only renamed conversations that already had a custom
     // title, so fresh chats stayed "New Conversation" forever while titled chats
@@ -225,14 +263,6 @@
       );
     } catch (err) {
       console.error('Failed to save conversation:', err);
-    }
-  }
-
-  function handleGlobeClick() {
-    if (!activeConversationId) {
-      createNewConversation();
-    } else {
-      showInput = true;
     }
   }
 
@@ -303,8 +333,11 @@
     chatController.abort();
   }
 
-  async function handleSend(e: CustomEvent<string>) {
-    const text = e.detail;
+  function focusComposer() {
+    window.dispatchEvent(new Event('glob:focus-composer'));
+  }
+
+  async function handleSend(text: string) {
     if (!text.trim() || !activeConversationId || isThinking) return;
 
     const convId = activeConversationId;
@@ -320,7 +353,11 @@
 
     conversations = conversations.map((c) =>
       c.id === convId
-        ? { ...c, messages: [...c.messages, { role: 'user', text }], updatedAt: Date.now() }
+        ? {
+            ...c,
+            messages: [...c.messages, { role: 'user', text, ts: Date.now() }],
+            updatedAt: Date.now()
+          }
         : c
     );
 
@@ -366,9 +403,18 @@
       // Empty assistant message for streaming, identified by id.
       conversations = conversations.map((c) =>
         c.id === convId
-          ? { ...c, messages: [...c.messages, { id: replyId, role: 'assistant', text: '' }] }
+          ? {
+              ...c,
+              messages: [
+                ...c.messages,
+                { id: replyId, role: 'assistant', text: '', ts: Date.now() }
+              ]
+            }
           : c
       );
+
+      // First byte arrived → the globe/chips move from THINKING to SPEAKING.
+      isStreaming = true;
 
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
@@ -427,11 +473,12 @@
       console.error('Chat error:', err);
 
       const aborted = err instanceof DOMException && err.name === 'AbortError';
+      // No emoji in product copy — these land verbatim in the transcript.
       let note: string;
-      if (aborted && stopRequested) note = assistantText ? '' : '⏹ Generation stopped.';
-      else if (aborted && timedOut) note = `⚠️ ${selectedProvider} timed out. Try again.`;
-      else if (aborted) note = '⏹ Generation stopped.';
-      else note = `⚠️ Cannot connect to ${selectedProvider}. Check settings.`;
+      if (aborted && stopRequested) note = assistantText ? '' : 'Generation stopped.';
+      else if (aborted && timedOut) note = `Timed out: ${selectedProvider}. Try again.`;
+      else if (aborted) note = 'Generation stopped.';
+      else note = `Cannot connect to ${selectedProvider}. Check settings.`;
 
       const bubbleText =
         assistantText + (assistantText && note ? `\n\n${note}` : note);
@@ -451,7 +498,10 @@
             }
           : {
               ...c,
-              messages: [...c.messages, { id: replyId, role: 'assistant' as const, text: bubbleText }]
+              messages: [
+                ...c.messages,
+                { id: replyId, role: 'assistant' as const, text: bubbleText, ts: Date.now() }
+              ]
             };
       });
 
@@ -460,6 +510,7 @@
       clearChatTimeout();
       chatController = null;
       isThinking = false;
+      isStreaming = false;
     }
   }
 
@@ -470,6 +521,26 @@
     saveCurrentConversation();
   }
 
+  /** ⌘K / ⌘1 toggle the conversation rail, ⌘, opens Settings (as the hints promise). */
+  $effect(() => {
+    if (!browser) return;
+
+    function onKey(e: KeyboardEvent) {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === 'k' || key === '1') {
+        e.preventDefault();
+        conversationsOpen = !conversationsOpen;
+      } else if (e.key === ',') {
+        e.preventDefault();
+        settingsOpen = true;
+      }
+    }
+
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
   // Initialize on mount
   if (browser) {
     loadConversations();
@@ -477,155 +548,117 @@
 </script>
 
 <svelte:head>
-  <title>Glob Interface</title>
-  <meta name="description" content="Neural Electric Globe — AI Interface" />
+  <title>Globe Interface</title>
+  <meta name="description" content="Visor HUD — Neural Globe AI Interface" />
 </svelte:head>
 
 {#if browser}
-  <!-- Conversation Sidebar -->
-  {#if conversations.length > 0}
-    <ConversationSidebar 
-      {conversations}
-      activeId={activeConversationId}
-      onSelect={selectConversation}
-      onNew={createNewConversation}
-      onDelete={deleteConversation}
+  <!-- Full-bleed neuron globe: continuous 3D rotation, state-driven animation -->
+  <NeuralGlobe mode={globeState} onTelemetry={(t) => (globeTelemetry = t)} />
+
+  <!-- Soft radial focus scrim so text reads without ever drawing a box -->
+  <div class="focus-scrim" aria-hidden="true"></div>
+
+  <!-- Transcript: reticle-bounded zone, turns split left/right -->
+  {#if activeConversationId}
+    <TranscriptZone
+      messages={activeMessages}
+      {isThinking}
+      {isStreaming}
+      provider={selectedProvider}
+      {jumpTick}
+      onStop={stopGeneration}
     />
   {/if}
 
-  <!-- Globe centered -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <div class="globe-wrapper" onclick={handleGlobeClick}>
-    <NeuralGlobe {isSpeaking} {isThinking} />
-  </div>
+  <Frame />
 
-  <!-- Chat history: single card on the LEFT side -->
-  {#if activeConversationId && conversations.length > 0}
-    {#each conversations as conv (conv.id)}
-      {#if conv.id === activeConversationId && conv.messages.length > 0}
-        <div class="chat-card">
-          {#each conv.messages as msg}
-            <ChatBubble message={msg} />
-          {/each}
-          {#if isThinking}
-            <div class="thinking">
-              <span class="dot"></span>
-              <span class="dot"></span>
-              <span class="dot"></span>
-              <button class="stop-btn" onclick={stopGeneration} title="Stop generating">
-                ■ Stop
-              </button>
-            </div>
-          {/if}
-        </div>
-      {/if}
-    {/each}
-  {/if}
+  <footer class="vis-footer">
+    THE GLOBE · VISOR HUD · NEURAL PROJECTION · {selectedProvider.toUpperCase()}
+  </footer>
 
-  <!-- Chat input at the BOTTOM CENTER -->
-  {#if activeConversationId && showInput}
-    <ChatInput 
-      bind:visible={showInput} 
-      on:send={handleSend}
+  <TopBar
+    hudState={hudState}
+    provider={selectedProvider}
+    onSettings={() => (settingsOpen = true)}
+  />
+
+  <IconRail
+    count={conversations.length}
+    active={conversationsOpen}
+    onToggleConversations={() => (conversationsOpen = !conversationsOpen)}
+    onNew={() => void createNewConversation()}
+    onFocusComposer={focusComposer}
+    onFocusTranscript={() => jumpTick++}
+  />
+
+  <TelemetryRail
+    telemetry={globeTelemetry}
+    hudState={hudState}
+    provider={settingsReady ? selectedProvider : ''}
+  />
+
+  {#if activeConversationId}
+    <Composer
+      disabled={isThinking}
+      onsend={(text) => void handleSend(text)}
     />
   {/if}
 
-  <!-- Device stats at the TOP RIGHT -->
-  <DeviceStats />
+  <LensOverlay />
 
-  <!-- Settings button at bottom right -->
-  <Settings 
-    initialProvider={selectedProvider} 
-    on:change={handleProviderChange} 
+  <ConversationsPanel
+    open={conversationsOpen}
+    conversations={panelConversations}
+    activeId={activeConversationId}
+    onclose={() => (conversationsOpen = false)}
+    onselect={(id) => void selectConversation(id)}
+    onnew={() => void createNewConversation()}
+    ondelete={(id) => void deleteConversation(id)}
+  />
+
+  <Settings
+    hideTrigger
+    bind:open={settingsOpen}
+    initialProvider={selectedProvider}
+    on:change={handleProviderChange}
   />
 {/if}
 
 <style>
-  .globe-wrapper {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100vw;
-    height: 100vh;
-    cursor: pointer;
-    z-index: 1;
-  }
+  .focus-scrim {
+   	position: fixed;
+   	inset: 0;
+   	z-index: 2;
+   	pointer-events: none;
+   	background: radial-gradient(
+   		ellipse 60% 55% at 50% 48%,
+   		rgba(5, 11, 26, 0.55) 0%,
+   		rgba(5, 11, 26, 0.28) 55%,
+   		rgba(5, 11, 26, 0) 100%
+   	);
+   }
 
-  .chat-card {
-    position: fixed;
-    top: 50%;
-    left: calc(280px + 40px);
-    transform: translateY(-50%);
-    z-index: 50;
-    width: min(320px, calc(100vw - 360px));
-    max-height: 70vh;
-    overflow-y: auto;
-    background: rgba(10, 15, 30, 0.8);
-    border: 1px solid rgba(68, 136, 255, 0.15);
-    border-radius: 16px;
-    padding: 16px;
-    backdrop-filter: blur(12px);
-    box-shadow: 0 0 30px rgba(68, 136, 255, 0.08);
-  }
+   .vis-footer {
+   	position: fixed;
+   	bottom: 24px;
+   	left: 50%;
+   	transform: translateX(-50%);
+   	z-index: 45;
+   	font-family: var(--font-mono);
+   	font-size: 9px;
+   	letter-spacing: 2.2px;
+   	color: var(--hud-steel);
+   	opacity: 0.75;
+   	white-space: nowrap;
+   	pointer-events: none;
+   }
 
-  .chat-card :global(::-webkit-scrollbar) {
-    width: 4px;
-  }
-
-  .chat-card :global(::-webkit-scrollbar-track) {
-    background: transparent;
-  }
-
-  .chat-card :global(::-webkit-scrollbar-thumb) {
-    background: rgba(68, 136, 255, 0.2);
-    border-radius: 2px;
-  }
-
-  .chat-card :global(::-webkit-scrollbar-thumb:hover) {
-    background: rgba(68, 136, 255, 0.4);
-  }
-
-  .thinking {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 8px 0;
-  }
-
-  .dot {
-    width: 6px;
-    height: 6px;
-    background: rgba(68, 136, 255, 0.5);
-    border-radius: 50%;
-    animation: pulse 1.2s ease-in-out infinite;
-  }
-
-  .dot:nth-child(2) { animation-delay: 0.2s; }
-  .dot:nth-child(3) { animation-delay: 0.4s; }
-
-  .stop-btn {
-    margin-left: auto;
-    padding: 4px 10px;
-    background: rgba(255, 107, 107, 0.15);
-    border: 1px solid rgba(255, 107, 107, 0.5);
-    border-radius: 8px;
-    color: #ff6b6b;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-    cursor: pointer;
-    transition: all 0.2s ease;
-  }
-
-  .stop-btn:hover {
-    background: rgba(255, 107, 107, 0.3);
-    box-shadow: 0 0 12px rgba(255, 107, 107, 0.3);
-  }
-
-  @keyframes pulse {
-    0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
-    40% { opacity: 1; transform: scale(1.2); }
-  }
+   @media (max-width: 720px) {
+   	.vis-footer {
+   		bottom: 14px;
+   		font-size: 8px;
+   		letter-spacing: 1.4px;
+   	}
+   }
 </style>

@@ -1,5 +1,5 @@
 /**
- * Single validated config module for The Glob's `/api/*` routes.
+ * Single validated config module for The Globe's `/api/*` routes.
  *
  * Every API route imports from here instead of re-declaring its own copy of the
  * provider table (it was triplicated across api/chat, api/health and api/settings).
@@ -45,7 +45,9 @@ export type Provider = (typeof PROVIDERS)[number];
 /** Non-secret provider defaults. Deliberately has no `apiKey` field (C4). */
 export const DEFAULTS: Record<Provider, { baseUrl: string; model: string }> = {
 	hermes: { baseUrl: '', model: 'hermes-agent' },
-	lmstudio: { baseUrl: 'http://localhost:1234/v1', model: '' },
+	// LM Studio's own loopback port, spelled `127.0.0.1`. Never a test-stub
+	// port: an e2e mock (5224) once leaked into the owner's shipped config.
+	lmstudio: { baseUrl: 'http://127.0.0.1:1234/v1', model: '' },
 	opencode: { baseUrl: 'http://localhost:8765/v1', model: '' },
 	openrouter: { baseUrl: 'https://openrouter.ai/api/v1', model: '' },
 	deepseek: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
