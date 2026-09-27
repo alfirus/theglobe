@@ -190,10 +190,19 @@ export function getConnectionIntensity(conn: NeuralConnection): number {
 export const lineVertexShader = `
 attribute float aActivity;
 varying float vActivity;
+varying float vFade;
 
 void main() {
   vActivity = aActivity;
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+
+  // Same depth cue as the nodes: dendrites on the far hemisphere dim, so the
+  // connecting lines turn with real volume instead of reading as a flat mesh.
+  vec3 sphereNormal = normalize(position / max(length(position), 1e-4));
+  vec3 viewNormal = normalize(mat3(modelViewMatrix) * sphereNormal);
+  vec3 viewDir = normalize(-mvPosition.xyz);
+  vFade = 0.2 + 0.8 * smoothstep(-0.4, 0.6, dot(viewNormal, viewDir));
+
   gl_Position = projectionMatrix * mvPosition;
 }
 `;
@@ -203,6 +212,7 @@ uniform vec3 uColor;
 uniform float uTime;
 
 varying float vActivity;
+varying float vFade;
 
 void main() {
   float intensity = 0.15 + vActivity * 1.5;
@@ -210,7 +220,7 @@ void main() {
   vec3 color = uColor * intensity;
   color = mix(color, vec3(1.0), vActivity * 0.25);
   
-  float alpha = clamp(intensity * 0.4, 0.05, 0.6);
+  float alpha = clamp(intensity * 0.4, 0.05, 0.6) * vFade;
   
   gl_FragColor = vec4(color, alpha);
 }

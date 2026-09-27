@@ -31,10 +31,12 @@
   import { marked } from 'marked';
 
   export type Message = {
-    /** Client-only identity used to target the right bubble while streaming (see +page.svelte). */
-    id?: string;
-    role: 'user' | 'assistant';
-    text: string;
+  	/** Client-only identity used to target the right bubble while streaming (see +page.svelte). */
+  	id?: string;
+  	role: 'user' | 'assistant';
+  	text: string;
+  	/** Client-only timestamp — the Visor HUD prints it in the turn header. */
+  	ts?: number;
   };
 
   let { message }: { message: Message } = $props();

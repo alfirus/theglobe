@@ -193,6 +193,8 @@ export const nodeVertexShader = `
 uniform float uTime;
 uniform float uBrightness;
 uniform float uActivityBoost;
+uniform float uInward;
+uniform float uOutward;
 
 attribute float aPhase;
 attribute float aBrightness;
@@ -214,6 +216,32 @@ void main() {
   vBrightness = aBrightness * breathe * uBrightness * activityBoost;
   
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+
+  // Depth cueing: a node on the far side of the sphere faces away from the
+  // camera, so it dims as the globe turns — this is what makes the rotation
+  // read as real 3D volume instead of a spinning texture.
+  vec3 sphereNormal = normalize(position / max(length(position), 1e-4));
+  vec3 viewNormal = normalize(mat3(modelViewMatrix) * sphereNormal);
+  vec3 viewDir = normalize(-mvPosition.xyz);
+  float facing = dot(viewNormal, viewDir);
+  float depthFade = 0.25 + 0.75 * smoothstep(-0.4, 0.6, facing);
+  vBrightness *= depthFade;
+
+  // State ripples (owner: the globe must animate in every state).
+  // uOutward — SPEAKING: a shell radiates from the core out to the rim,
+  // following the stream. uInward — THINKING: a shell collapses rim → core,
+  // like the model converging on an answer. Both fade with depth.
+  float radius = length(position);
+  if (uOutward > 0.001) {
+    float head = fract(uTime * 0.55) * 1.2;
+    float wave = 1.0 - smoothstep(0.0, 0.22, abs(radius - head));
+    vBrightness += wave * uOutward * 1.5 * depthFade;
+  }
+  if (uInward > 0.001) {
+    float head = 1.15 - fract(uTime * 0.8) * 1.15;
+    float wave = 1.0 - smoothstep(0.0, 0.2, abs(radius - head));
+    vBrightness += wave * uInward * 1.5 * depthFade;
+  }
   
   float sizeBase = 1.8 + aActivity * 2.0;
   gl_PointSize = (sizeBase) * (280.0 / -mvPosition.z);
@@ -264,7 +292,9 @@ export function createNodeMaterial(color: THREE.Color): THREE.ShaderMaterial {
       uTime: { value: 0 },
       uBrightness: { value: 0.9 },
       uColor: { value: color },
-      uActivityBoost: { value: 0 }
+      uActivityBoost: { value: 0 },
+      uInward: { value: 0 },
+      uOutward: { value: 0 }
     },
     transparent: true,
     blending: THREE.AdditiveBlending,
