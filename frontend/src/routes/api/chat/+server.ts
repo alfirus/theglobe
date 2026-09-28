@@ -53,8 +53,8 @@ async function callProvider(
 	} catch (err) {
 		if (err instanceof DOMException && err.name === 'TimeoutError') {
 			console.error(`Provider timeout (${url}) after ${timeoutMs}ms`);
-		const timeout = new Error(`Provider timed out after ${timeoutMs}ms`);
-		(timeout as NodeJS.ErrnoException).code = 'UPSTREAM_TIMEOUT';
+			const timeout = new Error(`Provider timed out after ${timeoutMs}ms`);
+			(timeout as NodeJS.ErrnoException).code = 'UPSTREAM_TIMEOUT';
 			throw timeout;
 		}
 		throw err;
@@ -181,7 +181,9 @@ export const POST: RequestHandler = async ({ request }) => {
 		uplinkId = providerId;
 	}
 
-	const config = isAgent(uplinkId) ? resolveAgent(uplinkId, settings) : resolveConfig(uplinkId, settings);
+	const config = isAgent(uplinkId)
+		? resolveAgent(uplinkId, settings)
+		: resolveConfig(uplinkId, settings);
 
 	if (!config.baseUrl) {
 		return json({ error: `No base URL configured for ${uplinkId}` }, { status: 502 });
@@ -217,7 +219,14 @@ export const POST: RequestHandler = async ({ request }) => {
 		// Bearer auth. The `providerId` param only picks auth headers, and no
 		// agent uses MiMo's `api-key` header, so providers pass their own id.
 		const authId: Provider = isAgent(uplinkId) ? 'hermes' : uplinkId;
-		return await callProvider(authId, config.baseUrl, config.apiKey, config.model, config.timeoutMs, messages);
+		return await callProvider(
+			authId,
+			config.baseUrl,
+			config.apiKey,
+			config.model,
+			config.timeoutMs,
+			messages
+		);
 	} catch (err) {
 		console.error('Chat error:', err instanceof Error ? err.message : 'unknown error');
 		if ((err as NodeJS.ErrnoException)?.code === 'UPSTREAM_TIMEOUT') {

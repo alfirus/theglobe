@@ -241,7 +241,6 @@ export function resolveProviderTimeoutMs(raw: unknown): number {
 	return Math.min(Math.max(Math.round(raw), MIN_PROVIDER_TIMEOUT_MS), MAX_PROVIDER_TIMEOUT_MS);
 }
 
-
 /** `true` when a key is available for the provider — never exposes any part of it. */
 export function hasKey(provider: Provider, settings: SettingsFile = readSettings()): boolean {
 	return resolveConfig(provider, settings).keySource !== 'none';
@@ -259,7 +258,10 @@ export const DEFAULT_AGENT: Agent = 'hermes-agent';
  * (`HERMES_API_KEY_HERMES_AGENT` / `_OPENCLAW_AGENT`) → generic env → ''.
  * baseUrl/model/timeoutMs: settings file overrides AGENT_DEFAULTS.
  */
-export function resolveAgent(agent: Agent, settings: SettingsFile = readSettings()): ResolvedConfig {
+export function resolveAgent(
+	agent: Agent,
+	settings: SettingsFile = readSettings()
+): ResolvedConfig {
 	const override = settings.agents?.[agent] ?? {};
 	const fileKey = (override.apiKey ?? '').trim();
 	const envKey = (process.env[agentKeyEnvName(agent)] ?? '').trim();
@@ -277,9 +279,11 @@ export function resolveAgent(agent: Agent, settings: SettingsFile = readSettings
 }
 
 /** Resolve the active uplink — provider or agent — in one call. */
-export function resolveUplink(
-	settings: SettingsFile = readSettings()
-): { mode: UplinkMode; id: Provider | Agent; config: ResolvedConfig } {
+export function resolveUplink(settings: SettingsFile = readSettings()): {
+	mode: UplinkMode;
+	id: Provider | Agent;
+	config: ResolvedConfig;
+} {
 	const mode = isUplinkMode(settings.uplinkMode) ? settings.uplinkMode : DEFAULT_UPLINK_MODE;
 	if (mode === 'agent') {
 		const agent = isAgent(settings.agent) ? settings.agent : DEFAULT_AGENT;
@@ -486,7 +490,7 @@ export function sanitizeSettingsBody(body: unknown): SettingsFile {
 			}
 			// Per-uplink timeout (ms): a positive number, clamped into range.
 			// Invalid values are rejected — a silently-accepted hostile timeout is
-				// the same pivot class as §4.1-2's hostile URL.
+			// the same pivot class as §4.1-2's hostile URL.
 			if (entry.timeoutMs !== undefined && entry.timeoutMs !== null) {
 				if (typeof entry.timeoutMs !== 'number' || !Number.isFinite(entry.timeoutMs)) {
 					throw new SettingsValidationError(`configs.${id}.timeoutMs must be a number`);
@@ -595,7 +599,8 @@ export interface PublicSettings {
 export function settingsToPublic(settings: SettingsFile = readSettings()): PublicSettings {
 	const out: PublicSettings = { configs: {}, keySource: {}, agents: {}, agentKeySource: {} };
 
-	if (settings.provider !== undefined && isProvider(settings.provider)) out.provider = settings.provider;
+	if (settings.provider !== undefined && isProvider(settings.provider))
+		out.provider = settings.provider;
 	if (typeof settings.systemPrompt === 'string') out.systemPrompt = settings.systemPrompt;
 	if (isUplinkMode(settings.uplinkMode)) out.uplinkMode = settings.uplinkMode;
 	if (isAgent(settings.agent)) out.agent = settings.agent;
@@ -666,10 +671,8 @@ export function resolveTts(settings: SettingsFile = readSettings()): ResolvedTts
 		const fileKey = (tts.apiKey ?? '').trim();
 		const envKey =
 			provider === 'openai'
-				? (
-						(process.env.VOICE_TOOLS_OPENAI_KEY ?? '').trim() ||
-						(process.env.OPENAI_API_KEY ?? '').trim()
-					)
+				? (process.env.VOICE_TOOLS_OPENAI_KEY ?? '').trim() ||
+					(process.env.OPENAI_API_KEY ?? '').trim()
 				: (process.env.ELEVENLABS_API_KEY ?? '').trim();
 		apiKey = fileKey || envKey || '';
 		keySource = apiKey === '' ? 'none' : fileKey ? 'file' : 'env';
@@ -678,7 +681,9 @@ export function resolveTts(settings: SettingsFile = readSettings()): ResolvedTts
 	return {
 		provider,
 		voice: (tts.voice ?? '').trim(),
-		model: (tts.model ?? '').trim() || (provider === 'elevenlabs' ? DEFAULT_TTS_ELEVENLABS_MODEL : DEFAULT_TTS_OPENAI_MODEL),
+		model:
+			(tts.model ?? '').trim() ||
+			(provider === 'elevenlabs' ? DEFAULT_TTS_ELEVENLABS_MODEL : DEFAULT_TTS_OPENAI_MODEL),
 		baseUrl: (tts.baseUrl ?? '').trim() || DEFAULT_TTS_OPENAI_BASE_URL,
 		apiKey,
 		keySource,
@@ -774,12 +779,18 @@ function safeEqual(a: string, b: string): boolean {
 
 function isLoopbackHost(host: string | null): boolean {
 	if (!host) return false;
-	const name = host.toLowerCase().replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+	const name = host
+		.toLowerCase()
+		.replace(/:\d+$/, '')
+		.replace(/^\[|\]$/g, '');
 	return name === 'localhost' || name === '127.0.0.1' || name === '::1';
 }
 
 function headerKeyMatches(request: Request, key: string): boolean {
-	const bearer = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '').trim();
+	const bearer = request.headers
+		.get('authorization')
+		?.replace(/^Bearer\s+/i, '')
+		.trim();
 	if (bearer && safeEqual(bearer, key)) return true;
 	const apiKeyHeader = request.headers.get('x-api-key')?.trim();
 	if (apiKeyHeader && safeEqual(apiKeyHeader, key)) return true;
@@ -822,7 +833,7 @@ export function assertApiRequest(request: Request): Response | null {
 	// 1. Origin / fetch-metadata checks
 	if (origin) {
 		if (origin === 'null') return errorResponse(403, 'Cross-origin request rejected');
-		let matches = false;
+		let matches: boolean;
 		try {
 			const url = new URL(origin);
 			matches =

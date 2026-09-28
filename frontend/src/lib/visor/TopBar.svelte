@@ -108,9 +108,18 @@
 
 	<button class="settings" onclick={onSettings} title="Settings">
 		<span class="gear" aria-hidden="true">
-			<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6">
+			<svg
+				viewBox="0 0 24 24"
+				width="14"
+				height="14"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.6"
+			>
 				<circle cx="12" cy="12" r="3"></circle>
-				<path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"></path>
+				<path
+					d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"
+				></path>
 			</svg>
 		</span>
 		SETTINGS

@@ -62,11 +62,17 @@ describe('POST /api/chat — request contract', () => {
 	});
 
 	it('rejects an unknown provider and an unknown uplink mode', async () => {
-		const badProvider = await call(postChat, chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'not-a-provider' } }));
+		const badProvider = await call(
+			postChat,
+			chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'not-a-provider' } })
+		);
 		expect(badProvider.status).toBe(400);
 		expect(((await badProvider.json()) as { error: string }).error).toContain('Invalid provider');
 
-		const badMode = await call(postChat, chatRequest({ message: 'hi' }, { headers: { 'x-uplink-mode': 'sideways' } }));
+		const badMode = await call(
+			postChat,
+			chatRequest({ message: 'hi' }, { headers: { 'x-uplink-mode': 'sideways' } })
+		);
 		expect(badMode.status).toBe(400);
 		expect(((await badMode.json()) as { error: string }).error).toContain('Invalid uplink mode');
 	});
@@ -83,7 +89,10 @@ describe('POST /api/chat — request contract', () => {
 
 	it('answers 502 when the selected uplink has no base URL configured', async () => {
 		const fetchStub = stubFetch();
-		const res = await call(postChat, chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'hermes' } }));
+		const res = await call(
+			postChat,
+			chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'hermes' } })
+		);
 		expect(res.status).toBe(502);
 		expect(((await res.json()) as { error: string }).error).toContain('No base URL configured');
 		expect(fetchStub.calls).toHaveLength(0);
@@ -93,7 +102,10 @@ describe('POST /api/chat — request contract', () => {
 		writeSettingsFile(providerSettings({ baseUrl: 'https://evil.example.com/v1' }));
 		const fetchStub = stubFetch();
 
-		const res = await call(postChat, chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'lmstudio' } }));
+		const res = await call(
+			postChat,
+			chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'lmstudio' } })
+		);
 		expect(res.status).toBe(400);
 		expect(((await res.json()) as { error: string }).error).toContain('URL not allowed');
 		expect(fetchStub.calls).toHaveLength(0);
@@ -103,7 +115,9 @@ describe('POST /api/chat — request contract', () => {
 describe('POST /api/chat — provider uplink (stubbed at the network layer)', () => {
 	beforeEach(() => {
 		clearSettingsFile();
-		writeSettingsFile(providerSettings({ baseUrl: 'http://127.0.0.1:9999/v1', model: 'stub-model', apiKey: SECRET }));
+		writeSettingsFile(
+			providerSettings({ baseUrl: 'http://127.0.0.1:9999/v1', model: 'stub-model', apiKey: SECRET })
+		);
 	});
 
 	it('relays the upstream SSE stream as `data:` frames and keeps [DONE]', async () => {
@@ -119,7 +133,10 @@ describe('POST /api/chat — provider uplink (stubbed at the network layer)', ()
 				)
 		);
 
-		const res = await call(postChat, chatRequest({ message: 'ping' }, { headers: { 'x-provider': 'lmstudio' } }));
+		const res = await call(
+			postChat,
+			chatRequest({ message: 'ping' }, { headers: { 'x-provider': 'lmstudio' } })
+		);
 		const text = await readSse(res);
 
 		expect(res.status).toBe(200);
@@ -133,7 +150,10 @@ describe('POST /api/chat — provider uplink (stubbed at the network layer)', ()
 		const fetchStub = stubFetch();
 		fetchStub.respondWith(() => new Response('sentinel'));
 
-		await call(postChat, chatRequest({ message: 'ping' }, { headers: { 'x-provider': 'lmstudio' } }));
+		await call(
+			postChat,
+			chatRequest({ message: 'ping' }, { headers: { 'x-provider': 'lmstudio' } })
+		);
 
 		expect(fetchStub.calls).toHaveLength(1);
 		const call0 = fetchStub.calls[0];
@@ -190,14 +210,22 @@ describe('POST /api/chat — provider uplink (stubbed at the network layer)', ()
 			postChat,
 			chatRequest(
 				{ message: 'hi' },
-				{ headers: { 'x-provider': 'lmstudio', 'x-system-prompt': 'Header prompt wins when body is empty' } }
+				{
+					headers: {
+						'x-provider': 'lmstudio',
+						'x-system-prompt': 'Header prompt wins when body is empty'
+					}
+				}
 			)
 		);
 
 		const payload = JSON.parse(String(fetchStub.calls[0].init.body)) as {
 			messages: Array<{ role: string; content: string }>;
 		};
-		expect(payload.messages[0]).toEqual({ role: 'system', content: 'Header prompt wins when body is empty' });
+		expect(payload.messages[0]).toEqual({
+			role: 'system',
+			content: 'Header prompt wins when body is empty'
+		});
 	});
 
 	it('caps history to the most recent 40 entries and 16 000 chars each', async () => {
@@ -209,7 +237,10 @@ describe('POST /api/chat — provider uplink (stubbed at the network layer)', ()
 			content: `turn ${i} ${'y'.repeat(20_000)}`
 		}));
 
-		await call(postChat, chatRequest({ message: 'now', history }, { headers: { 'x-provider': 'lmstudio' } }));
+		await call(
+			postChat,
+			chatRequest({ message: 'now', history }, { headers: { 'x-provider': 'lmstudio' } })
+		);
 
 		const payload = JSON.parse(String(fetchStub.calls[0].init.body)) as {
 			messages: Array<{ role: string; content: string }>;
@@ -228,7 +259,10 @@ describe('POST /api/chat — provider uplink (stubbed at the network layer)', ()
 
 		await call(
 			postChat,
-			chatRequest({ message: 'hi', systemPrompt: 'p'.repeat(9_000) }, { headers: { 'x-provider': 'lmstudio' } })
+			chatRequest(
+				{ message: 'hi', systemPrompt: 'p'.repeat(9_000) },
+				{ headers: { 'x-provider': 'lmstudio' } }
+			)
 		);
 
 		const payload = JSON.parse(String(fetchStub.calls[0].init.body)) as {
@@ -274,14 +308,23 @@ describe('POST /api/chat — provider uplink (stubbed at the network layer)', ()
 	it('routes the agent uplink through the agent entry and its own key', async () => {
 		writeSettingsFile({
 			provider: 'lmstudio',
-			agents: { 'hermes-agent': { baseUrl: 'http://127.0.0.1:8642/v1', model: 'agent-model', apiKey: 'agent-key' } }
+			agents: {
+				'hermes-agent': {
+					baseUrl: 'http://127.0.0.1:8642/v1',
+					model: 'agent-model',
+					apiKey: 'agent-key'
+				}
+			}
 		});
 		const fetchStub = stubFetch();
 		fetchStub.respondWith(() => new Response('sentinel'));
 
 		const res = await call(
 			postChat,
-			chatRequest({ message: 'hi' }, { headers: { 'x-uplink-mode': 'agent', 'x-agent': 'hermes-agent' } })
+			chatRequest(
+				{ message: 'hi' },
+				{ headers: { 'x-uplink-mode': 'agent', 'x-agent': 'hermes-agent' } }
+			)
 		);
 
 		expect(res.status).toBe(200);
@@ -295,7 +338,10 @@ describe('POST /api/chat — provider uplink (stubbed at the network layer)', ()
 	it('rejects an unknown agent id', async () => {
 		const res = await call(
 			postChat,
-			chatRequest({ message: 'hi' }, { headers: { 'x-uplink-mode': 'agent', 'x-agent': 'hal-9000' } })
+			chatRequest(
+				{ message: 'hi' },
+				{ headers: { 'x-uplink-mode': 'agent', 'x-agent': 'hal-9000' } }
+			)
 		);
 		expect(res.status).toBe(400);
 		expect(((await res.json()) as { error: string }).error).toContain('Invalid agent');
@@ -320,7 +366,10 @@ describe('POST /api/chat — upstream reasoning frames', () => {
 				)
 		);
 
-		const res = await call(postChat, chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'lmstudio' } }));
+		const res = await call(
+			postChat,
+			chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'lmstudio' } })
+		);
 		const text = await readSse(res);
 
 		expect(text).toContain('data: {"thinking":"pondering"}');
@@ -332,13 +381,19 @@ describe('POST /api/chat — upstream reasoning frames', () => {
 		const fetchStub = stubFetch();
 		fetchStub.respondWith(
 			() =>
-				new Response('data: {not json}\n\ndata: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n', {
-					status: 200,
-					headers: { 'Content-Type': 'text/event-stream' }
-				})
+				new Response(
+					'data: {not json}\n\ndata: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+					{
+						status: 200,
+						headers: { 'Content-Type': 'text/event-stream' }
+					}
+				)
 		);
 
-		const res = await call(postChat, chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'lmstudio' } }));
+		const res = await call(
+			postChat,
+			chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'lmstudio' } })
+		);
 		const text = await readSse(res);
 		expect(text).toContain('data: {"content":"ok"}');
 	});
@@ -357,7 +412,10 @@ describe('POST /api/chat — failure mapping and secret hygiene', () => {
 			throw new Error('connect ECONNREFUSED 127.0.0.1:9999');
 		});
 
-		const res = await call(postChat, chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'lmstudio' } }));
+		const res = await call(
+			postChat,
+			chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'lmstudio' } })
+		);
 		const raw = await res.text();
 
 		expect(res.status).toBe(503);
@@ -370,7 +428,10 @@ describe('POST /api/chat — failure mapping and secret hygiene', () => {
 		const fetchStub = stubFetch();
 		fetchStub.respondWith(() => new Response('boom', { status: 500 }));
 
-		const res = await call(postChat, chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'lmstudio' } }));
+		const res = await call(
+			postChat,
+			chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'lmstudio' } })
+		);
 		expect(res.status).toBe(503);
 		expect(((await res.json()) as { error: string }).error).toContain('Cannot connect');
 	});
@@ -381,7 +442,10 @@ describe('POST /api/chat — failure mapping and secret hygiene', () => {
 			throw new DOMException('The operation timed out', 'TimeoutError');
 		});
 
-		const res = await call(postChat, chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'lmstudio' } }));
+		const res = await call(
+			postChat,
+			chatRequest({ message: 'hi' }, { headers: { 'x-provider': 'lmstudio' } })
+		);
 		const body = (await res.json()) as { error: string };
 		expect(res.status).toBe(504);
 		expect(body.error).toContain('lmstudio');

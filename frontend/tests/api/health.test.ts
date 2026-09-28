@@ -180,7 +180,10 @@ describe('POST /api/health — probe contract (P1-2 surfaced health / M15)', () 
 		expect(bad.status).toBe(400);
 		expect(((await bad.json()) as { code: string }).code).toBe('invalid_request');
 
-		const crossOrigin = await call(postHealth, healthRequest({ providerId: 'lmstudio' }, { headers: { origin: 'https://evil.example.com' } }));
+		const crossOrigin = await call(
+			postHealth,
+			healthRequest({ providerId: 'lmstudio' }, { headers: { origin: 'https://evil.example.com' } })
+		);
 		expect(crossOrigin.status).toBe(403);
 	});
 });

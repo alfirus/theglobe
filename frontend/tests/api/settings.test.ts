@@ -147,7 +147,9 @@ describe('POST /api/settings — validate, sanitise, store, echo nothing secret'
 	it('merges a patch instead of clobbering the stored config', async () => {
 		writeSettingsFile({
 			provider: 'lmstudio',
-			configs: { lmstudio: { baseUrl: 'http://127.0.0.1:1234/v1', model: 'keep-me', apiKey: SECRET } }
+			configs: {
+				lmstudio: { baseUrl: 'http://127.0.0.1:1234/v1', model: 'keep-me', apiKey: SECRET }
+			}
 		});
 
 		await call(postSettings, postJson('/api/settings', { provider: 'deepseek' }));
@@ -167,7 +169,11 @@ describe('POST /api/settings — validate, sanitise, store, echo nothing secret'
 	it('rejects a cross-origin write', async () => {
 		const res = await call(
 			postSettings,
-			postJson('/api/settings', { provider: 'deepseek' }, { headers: { origin: 'https://evil.example.com' } })
+			postJson(
+				'/api/settings',
+				{ provider: 'deepseek' },
+				{ headers: { origin: 'https://evil.example.com' } }
+			)
 		);
 		expect(res.status).toBe(403);
 		expect(readSettingsFile()).toEqual({});

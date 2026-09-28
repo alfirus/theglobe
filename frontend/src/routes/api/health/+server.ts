@@ -56,7 +56,10 @@ export const POST: RequestHandler = async ({ request }) => {
 	let uplinkId: Agent | Provider;
 	if (agentId) {
 		if (!isAgent(agentId)) {
-			return json({ error: `Invalid agent: ${agentId}`, code: 'invalid_provider' }, { status: 400 });
+			return json(
+				{ error: `Invalid agent: ${agentId}`, code: 'invalid_provider' },
+				{ status: 400 }
+			);
 		}
 		uplinkId = agentId;
 	} else {
@@ -64,7 +67,10 @@ export const POST: RequestHandler = async ({ request }) => {
 			return json({ error: 'Provider ID is required', code: 'invalid_request' }, { status: 400 });
 		}
 		if (!isProvider(providerId)) {
-			return json({ error: `Invalid provider: ${providerId}`, code: 'invalid_provider' }, { status: 400 });
+			return json(
+				{ error: `Invalid provider: ${providerId}`, code: 'invalid_provider' },
+				{ status: 400 }
+			);
 		}
 		uplinkId = providerId;
 	}

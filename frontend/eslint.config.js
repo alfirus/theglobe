@@ -3,6 +3,7 @@ import js from '@eslint/js';
 import svelte from 'eslint-plugin-svelte';
 import globals from 'globals';
 import ts from 'typescript-eslint';
+import svelteConfig from './svelte.config.js';
 
 /** @type {import('eslint').Linter.Config[]} */
 export default [
@@ -11,6 +12,18 @@ export default [
 	...svelte.configs['flat/recommended'],
 	prettier,
 	...svelte.configs['flat/prettier'],
+	{
+		// TypeScript inside `.svelte` files: without this the script blocks
+		// are parsed as plain JS and every `import type` / `as` fails.
+		files: ['**/*.svelte', '**/*.svelte.ts', '**/*.svelte.js'],
+		languageOptions: {
+			parserOptions: {
+				parser: ts.parser,
+				extraFileExtensions: ['.svelte'],
+				svelteConfig
+			}
+		}
+	},
 	{
 		languageOptions: {
 			globals: {

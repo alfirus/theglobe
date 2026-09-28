@@ -141,7 +141,14 @@
 		{#each suggestions as suggestion (suggestion.label)}
 			<button class="chip" onclick={() => applySuggestion(suggestion.label)} {disabled}>
 				<span class="chip-glyph" aria-hidden="true">
-					<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6">
+					<svg
+						viewBox="0 0 24 24"
+						width="13"
+						height="13"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.6"
+					>
 						{#if suggestion.glyph === 'reticle'}
 							<circle cx="12" cy="12" r="7.5"></circle>
 							<circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"></circle>
@@ -177,7 +184,14 @@
 				title={isListening ? 'Stop listening' : 'Voice input'}
 				aria-label={isListening ? 'Stop listening' : 'Voice input'}
 			>
-				<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6">
+				<svg
+					viewBox="0 0 24 24"
+					width="16"
+					height="16"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.6"
+				>
 					<rect x="9" y="3" width="6" height="11" rx="3"></rect>
 					<path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path>
 				</svg>
@@ -199,11 +213,24 @@
 			type="text"
 			placeholder={isListening ? 'Listening…' : 'Message the Globe'}
 			aria-label="Message the Globe"
-			disabled={disabled}
+			{disabled}
 		/>
 
-		<button class="send" onclick={submit} disabled={disabled || !input.trim()} title="Send" aria-label="Send message">
-			<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6">
+		<button
+			class="send"
+			onclick={submit}
+			disabled={disabled || !input.trim()}
+			title="Send"
+			aria-label="Send message"
+		>
+			<svg
+				viewBox="0 0 24 24"
+				width="16"
+				height="16"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.6"
+			>
 				<path d="M12 19V5M6 11l6-6 6 6"></path>
 			</svg>
 		</button>
@@ -212,7 +239,7 @@
 	</div>
 
 	<div class="hints">
-		    <span class="hint">THE GLOBE · ambient listening armed</span>
+		<span class="hint">THE GLOBE · ambient listening armed</span>
 		<span class="hint keys">⌘K CONVERSATIONS · ⌘, SETTINGS</span>
 	</div>
 </div>

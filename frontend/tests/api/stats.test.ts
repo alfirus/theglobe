@@ -92,7 +92,10 @@ describe('GET /api/stats — device stats for the status panel', () => {
 	});
 
 	it('rejects a cross-origin caller', async () => {
-		const res = await call(getStats, getRequest('/api/stats', { headers: { origin: 'https://evil.example.com' } }));
+		const res = await call(
+			getStats,
+			getRequest('/api/stats', { headers: { origin: 'https://evil.example.com' } })
+		);
 		expect(res.status).toBe(403);
 	});
 });

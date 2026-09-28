@@ -1,6 +1,14 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+	closeSync,
+	existsSync,
+	openSync,
+	readFileSync,
+	statSync,
+	unlinkSync,
+	writeFileSync
+} from 'node:fs';
 import { tmpdir, platform, homedir } from 'node:os';
 import { join } from 'node:path';
 import type { RequestHandler } from './$types';
@@ -94,7 +102,11 @@ function splitWav(buffer: Buffer): { header: Buffer; pcm: Buffer; headerLen: num
 		const id = buffer.toString('ascii', offset, offset + 4);
 		const size = buffer.readUInt32LE(offset + 4);
 		if (id === 'data') {
-			return { header: buffer.subarray(0, offset + 8), pcm: buffer.subarray(offset + 8, offset + 8 + size), headerLen: offset + 8 };
+			return {
+				header: buffer.subarray(0, offset + 8),
+				pcm: buffer.subarray(offset + 8, offset + 8 + size),
+				headerLen: offset + 8
+			};
 		}
 		offset += 8 + size + (size % 2);
 	}
@@ -143,7 +155,7 @@ function checkAudioFile(path: string, engine: string): void {
 		}
 	} catch (err) {
 		if (err instanceof Error && err.message.startsWith(engine)) throw err;
-		throw new Error(`${engine} produced no audio output`);
+		throw new Error(`${engine} produced no audio output`, { cause: err });
 	}
 }
 
@@ -204,11 +216,11 @@ function systemTts(voice: string): SystemTts | { error: string } {
 					[
 						'$b64 = [Console]::In.ReadToEnd()',
 						'$text = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($b64))',
-						"Add-Type -AssemblyName System.Speech",
+						'Add-Type -AssemblyName System.Speech',
 						'$s = New-Object System.Speech.Synthesis.SpeechSynthesizer',
-						`$v = \"${voice.replace(/\"/g, '')}\"`,
-						'if ($v) { $m = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Name -like \"*$v*\" } | Select-Object -First 1; if ($m) { $s.SelectVoice($m.VoiceInfo.Name) } }',
-						`$s.SetOutputToWaveFile(\"${outFile.replace(/\"/g, '')}\")`,
+						`$v = "${voice.replace(/"/g, '')}"`,
+						'if ($v) { $m = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Name -like "*$v*" } | Select-Object -First 1; if ($m) { $s.SelectVoice($m.VoiceInfo.Name) } }',
+						`$s.SetOutputToWaveFile("${outFile.replace(/"/g, '')}")`,
 						'$s.Speak($text)',
 						'$s.Dispose()'
 					].join('; ')
@@ -227,7 +239,11 @@ function systemTts(voice: string): SystemTts | { error: string } {
 	};
 }
 
-function runSystemTts(text: string, voice: string, timeoutMs: number): Promise<{ file: string; contentType: string; cleanup: () => void }> {
+function runSystemTts(
+	text: string,
+	voice: string,
+	timeoutMs: number
+): Promise<{ file: string; contentType: string; cleanup: () => void }> {
 	const resolved = systemTts(voice);
 	if ('error' in resolved) return Promise.reject(new Error(resolved.error));
 	const { tmpIn, tmpOut } = tempFiles('system-tts', resolved.ext);
@@ -264,7 +280,11 @@ function runSystemTts(text: string, voice: string, timeoutMs: number): Promise<{
 				reject(checkErr instanceof Error ? checkErr : new Error(String(checkErr)));
 				return;
 			}
-			resolve({ file: tmpOut, contentType: resolved.contentType, cleanup: () => cleanup(tmpIn, tmpOut) });
+			resolve({
+				file: tmpOut,
+				contentType: resolved.contentType,
+				cleanup: () => cleanup(tmpIn, tmpOut)
+			});
 		};
 
 		const timer = setTimeout(() => {
@@ -445,13 +465,17 @@ function resolveCli(cmd: string): string {
 		try {
 			if (existsSync(full) && statSync(full).isFile()) return full;
 		} catch {
-		/* keep probing */
+			/* keep probing */
 		}
 	}
 	return cmd; // fall back to PATH lookup; ENOENT handler names the fix
 }
 
-function runEdgeTts(text: string, voice: string, timeoutMs: number): Promise<{ file: string; contentType: string; cleanup: () => void }> {
+function runEdgeTts(
+	text: string,
+	voice: string,
+	timeoutMs: number
+): Promise<{ file: string; contentType: string; cleanup: () => void }> {
 	const { tmpIn, tmpOut } = tempFiles('edge-tts', 'mp3');
 	writeFileSync(tmpIn, text, 'utf-8');
 
@@ -461,7 +485,11 @@ function runEdgeTts(text: string, voice: string, timeoutMs: number): Promise<{ f
 		const argv = voice
 			? ['--voice', voice, '--file', tmpIn, '--write-media', tmpOut]
 			: ['--file', tmpIn, '--write-media', tmpOut];
-		const child = spawn(resolveCli('edge-tts'), argv, { shell: false, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+		const child = spawn(resolveCli('edge-tts'), argv, {
+			shell: false,
+			stdio: ['ignore', 'ignore', 'pipe'],
+			windowsHide: true
+		});
 
 		const done = (err: Error | null): void => {
 			if (settled) return;
@@ -490,7 +518,9 @@ function runEdgeTts(text: string, voice: string, timeoutMs: number): Promise<{ f
 		child.on('error', (err) => {
 			const missing =
 				err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT'
-					? new Error('edge-tts CLI not found — install it (`pip install edge-tts`) or switch the TTS engine in Settings')
+					? new Error(
+							'edge-tts CLI not found — install it (`pip install edge-tts`) or switch the TTS engine in Settings'
+						)
 					: err;
 			done(missing instanceof Error ? missing : new Error(String(missing)));
 		});
@@ -545,7 +575,7 @@ async function runCloudTts(opts: {
 		});
 	} catch (err) {
 		if (err instanceof DOMException && err.name === 'TimeoutError') {
-			throw new Error(`${engine} TTS timed out after ${timeoutMs}ms`);
+			throw new Error(`${engine} TTS timed out after ${timeoutMs}ms`, { cause: err });
 		}
 		throw err;
 	}
@@ -595,7 +625,10 @@ export const POST: RequestHandler = async ({ request }) => {
 		Math.max(5_000, Math.floor(timeoutMs / (chunks.length - i)));
 
 	/** One chunk → audio bytes. File engines return WAV, cloud engines MP3. */
-	async function synthChunk(chunk: string, i: number): Promise<{ audio: Buffer; contentType: string }> {
+	async function synthChunk(
+		chunk: string,
+		i: number
+	): Promise<{ audio: Buffer; contentType: string }> {
 		const budget = chunkTimeout(i);
 		if (tts.provider === 'system') {
 			const { file, contentType, cleanup: done } = await runSystemTts(chunk, tts.voice, budget);
@@ -630,7 +663,13 @@ export const POST: RequestHandler = async ({ request }) => {
 		if (!modelPath) throw new Error(error ?? 'TTS is not available');
 		const { tmpIn, tmpOut } = tempFiles('piper', 'wav');
 		try {
-			await synthesize({ text: chunk, modelPath, inputFile: tmpIn, outputFile: tmpOut, timeoutMs: budget });
+			await synthesize({
+				text: chunk,
+				modelPath,
+				inputFile: tmpIn,
+				outputFile: tmpOut,
+				timeoutMs: budget
+			});
 			return { audio: readFileSync(tmpOut), contentType: 'audio/wav' };
 		} finally {
 			cleanup(tmpIn, tmpOut);
@@ -691,4 +730,3 @@ export const POST: RequestHandler = async ({ request }) => {
 		return new Response('TTS failed', { status: 500 });
 	}
 };
-
