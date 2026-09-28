@@ -32,6 +32,17 @@
   import { marked } from 'marked';
   import { createEventDispatcher } from 'svelte';
 
+  /**
+   * The classified failure riding on a turn (P1-2). Mirrors the fields of
+   * `ChatError` the UI is allowed to show — `code`/`status`/`upstream`/`reason`
+   * stay in the logs, never in the bubble.
+   */
+  export type MessageError = {
+  	title: string;
+  	detail: string;
+  	retryable: boolean;
+  };
+
   export type Message = {
   	/** Client-only identity used to target the right bubble while streaming (see +page.svelte). */
   	id?: string;
@@ -39,6 +50,10 @@
   	text: string;
   	/** Client-only timestamp — the Visor HUD prints it in the turn header. */
   	ts?: number;
+  	/** Set from Send until the first byte: renders the pending skeleton. */
+  	pending?: boolean;
+  	/** Present when this turn ended in a classified failure — drives the error box. */
+  	error?: MessageError;
   };
 
   let { message }: { message: Message } = $props();
@@ -111,8 +126,28 @@
 
 <div class="message {message.role}">
   <span class="role">{message.role === 'user' ? 'You' : 'Globe'}</span>
-  {#if message.role === 'assistant'}
+  {#if message.pending}
+    <!-- Send-time placeholder: three pulsing dots until the first byte lands. -->
+    <div class="skeleton" role="status" aria-label="Generating a reply">
+      <span class="dot"></span>
+      <span class="dot"></span>
+      <span class="dot"></span>
+    </div>
+  {:else if message.role === 'assistant'}
     <div class="text markdown-content">{@html renderMarkdown(message.text)}</div>
+    {#if message.error}
+      <!-- Classified failure: its own title + detail, and a Retry only when
+           the class is actually retryable (P1-2 / QA-11-01). -->
+      <div class="error-box" role="alert">
+        <span class="error-title">{message.error.title}</span>
+        <span class="error-detail">{message.error.detail}</span>
+        {#if message.error.retryable}
+          <button type="button" class="retry-btn" onclick={handleRetry} title="Send this message again">
+            Retry
+          </button>
+        {/if}
+      </div>
+    {/if}
   {:else}
     <!-- Svelte escapes interpolated text, so this renders inert by construction. -->
     <div class="text plain-text">{message.text}</div>

@@ -1,11 +1,18 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import type { Provider } from '$lib/Settings.svelte';
   import { logEvent, errorFields } from '$lib/log';
 
   export type HealthStatus = 'unknown' | 'healthy' | 'unhealthy' | 'checking';
 
-  let { provider }: { provider: Provider } = $props();
+  /**
+   * `provider` is the uplink id on display — a provider id or, in agent mode,
+   * an agent id. `mode` picks which field `/api/health` expects; the two are
+   * validated by separate guards server-side.
+   */
+  let {
+    provider,
+    mode = 'provider'
+  }: { provider: string; mode?: 'provider' | 'agent' } = $props();
   const dispatch = createEventDispatcher<{ recheck: void }>();
 
   let status = $state<HealthStatus>('unknown');
@@ -22,7 +29,7 @@
       const res = await fetch('/api/health', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ providerId: provider })
+        body: JSON.stringify(mode === 'agent' ? { agentId: provider } : { providerId: provider })
       });
 
       if (!res.ok) {
@@ -123,6 +130,10 @@
   {#if status === 'checking'}
     <span class="spinner" />
   {/if}
+  {#if status === 'unhealthy' && error}
+    <!-- The reason is on the chip itself — no Settings round-trip to find out why. -->
+    <span class="why">{error}</span>
+  {/if}
 </div>
 
 <style>
@@ -163,6 +174,15 @@
     color: #4ade80;
     font-size: 11px;
     margin-left: 2px;
+  }
+
+  .why {
+    max-width: min(44vw, 340px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #ff6b6b;
+    font-size: 11px;
   }
 
   .spinner {

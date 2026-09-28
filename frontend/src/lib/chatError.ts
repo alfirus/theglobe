@@ -193,6 +193,9 @@ export function classifyHttpFailure({
 	if (code === 'provider_unreachable') return unreachableError(provider, serverError);
 	if (status === 401 || status === 403) return blockedError(status, serverError);
 	if (status >= 400 && status < 500) return requestError(status, serverError);
+	// 504 from our own API is always an upstream deadline — a classified
+	// timeout even when the body never carried `code: 'provider_timeout'`.
+	if (status === 504) return timeoutError(provider, serverError || 'upstream_timeout');
 	// A coded 5xx we don't recognise still means the provider, not the payload.
 	return unreachableError(provider, serverError || `HTTP ${status}`);
 }

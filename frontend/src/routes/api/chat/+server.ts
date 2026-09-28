@@ -169,6 +169,15 @@ async function callProvider(
 				}
 			} catch (err) {
 				logEvent('chat', 'stream_read_failed', { forwarded, ...errorFields(err) }, 'error');
+				// The upstream died mid-reply. Closing the stream cleanly would let the
+				// client pass truncated text off as a finished answer, so tag the end of
+				// the stream; the client turns this into the `stream` class with Retry
+				// (QA-11-08) while keeping the text it already received.
+				try {
+					controller.enqueue(new TextEncoder().encode('data: {"error":"stream_read_failed"}\n\n'));
+				} catch (notifyErr) {
+					logEvent('chat', 'stream_notify_skipped', errorFields(notifyErr), 'debug');
+				}
 			} finally {
 				try {
 					controller.close();
@@ -239,7 +248,10 @@ export const POST: RequestHandler = async ({ request }) => {
 	const config = isAgent(uplinkId) ? resolveAgent(uplinkId, settings) : resolveConfig(uplinkId, settings);
 
 	if (!config.baseUrl) {
-		return json({ error: `No base URL configured for ${uplinkId}` }, { status: 502 });
+		return json(
+			{ error: `No base URL configured for ${uplinkId}`, code: 'not_configured' },
+			{ status: 502 }
+		);
 	}
 	if (!isAllowedUrl(config.baseUrl)) {
 		return json({ error: `URL not allowed: ${config.baseUrl}`, code: 'url_not_allowed' }, { status: 400 });
@@ -276,8 +288,27 @@ export const POST: RequestHandler = async ({ request }) => {
 	} catch (err) {
 		console.error('Chat error:', err instanceof Error ? err.message : 'unknown error');
 		if ((err as NodeJS.ErrnoException)?.code === 'UPSTREAM_TIMEOUT') {
-			return json({ error: `${uplinkId} timed out after ${config.timeoutMs}ms` }, { status: 504 });
+			return json(
+				{ error: `${uplinkId} timed out after ${config.timeoutMs}ms`, code: 'provider_timeout' },
+				{ status: 504 }
+			);
 		}
-		return json({ error: `Cannot connect to ${uplinkId}` }, { status: 503 });
+		// The provider answered, just not with a stream. Status and `error` stay
+		// exactly as they were; `code` + `upstream` are what let the client split
+		// an auth rejection (401/403) from any other provider 5xx (QA-11-02).
+		if (err instanceof ProviderHttpError) {
+			return json(
+				{
+					error: `Cannot connect to ${uplinkId}`,
+					code: err.status === 401 || err.status === 403 ? 'provider_auth' : 'provider_http',
+					upstream: err.status
+				},
+				{ status: 503 }
+			);
+		}
+		return json(
+			{ error: `Cannot connect to ${uplinkId}`, code: 'provider_unreachable' },
+			{ status: 503 }
+		);
 	}
 };
