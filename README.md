@@ -10,7 +10,7 @@ The Globe Interface is a locally-hosted, visually reactive **neural electric glo
 
 Today it runs as a **SvelteKit app in your browser** — no desktop shell yet. The floating transparent window (Electron) is planned, not built; see [ADR-0001](docs/adr/0001-use-sveltekit-routes-as-the-bridge.md) and the phase table below.
 
-The LLM calls come from the app's own server routes to an OpenAI-compatible provider (LM Studio at `127.0.0.1:1234` by default). The deeper [Hermes Agent](https://hermes-agent.nousresearch.com/) integration — skills, memory, sessions, tools — is the target architecture: the chat route currently sends a stateless message list, so no conversation history, session, or tool use reaches the model yet.
+The LLM calls come from the app's own server routes to an OpenAI-compatible provider (LM Studio at `127.0.0.1:1234` by default). The deeper [Hermes Agent](https://hermes-agent.nousresearch.com/) integration — skills, memory, sessions, tools — is the target architecture: the chat route sends the conversation's history and the configured system prompt (when set) with each request, but sessions, memory, and tool use do not reach the model yet.
 
 ## ✨ Features
 
@@ -145,14 +145,14 @@ theglobe/
 | Phase | Status | Description |
 |-------|--------|-------------|
 | 1. Static Neural Globe | ✅ Shipped | Three.js scene, 680 nodes, connections, idle animation |
-| 2. Text Chat | ✅ Shipped | SvelteKit `/api/chat`, streaming SSE, multi-provider settings, conversation sidebar |
+| 2. Text Chat | ✅ Shipped | SvelteKit `/api/chat`, streaming SSE, multi-provider settings, conversation sidebar, multi-turn history + system prompt |
 | 3. Voice Input | ✅ Shipped | Web Speech API microphone input (Chrome/Edge only) |
 | 4. Voice Output | ✅ Shipped | Piper TTS playback (audio-reactive animation not built) |
 | 5. Polish | 🔲 TODO | Emotion mapping, particles, error states |
 | 6. Electron | 🔲 TODO | Transparent window, desktop pet |
 | 7. Advanced | 🔲 TODO | Wake word, multi-language, AI City integration |
 
-**Known gaps:** the shipped chat has no multi-turn history and does not send the configured system prompt to the provider. Both are in progress under the current P0 work (`p0-chat-core` / `p0-api-security`) and are **not merged yet** — treat Phases 2–4 as shipped-with-known-gaps, not finished.
+**Known gaps:** multi-turn history and the configured system prompt are **merged** — the chat route sends the system prompt as the first message, follows it with the conversation's most recent 40 history entries, then the new user message, and the UI builds that history from the conversation you have open. Still not built: the deeper Hermes integration — sessions, memory, and tool use do not reach the model yet.
 
 ## Agent Workflow
 
