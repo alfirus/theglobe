@@ -4,8 +4,9 @@
   // Voice results go out through the same `send` event as typed input — there is
   // deliberately no second `onVoice` callback (L9: two paths, one of them a dead
   // `console.log` stub in the parent).
-  let { visible = $bindable(false) }: {
+  let { visible = $bindable(false), isListening = $bindable(false) }: {
     visible?: boolean;
+    isListening?: boolean;
   } = $props();
 
   const dispatch = createEventDispatcher<{ send: string }>();
@@ -13,8 +14,7 @@
   let input = $state('');
   let inputEl: HTMLInputElement;
   
-  // Voice recognition state
-  let isListening = $state(false);
+  // Voice recognition state — `isListening` comes from the bindable prop above.
   let recognition: any = null;
   let voiceText = $state('');
   let hasVoiceSupport = $state(false);
@@ -116,6 +116,13 @@
   $effect(() => {
     if (visible && inputEl) {
       inputEl.focus();
+    }
+  });
+
+  // Stop speech recognition when the input is hidden (P1-2).
+  $effect(() => {
+    if (!visible && isListening) {
+      stopListening();
     }
   });
 </script>
