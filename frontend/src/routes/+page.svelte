@@ -795,6 +795,7 @@
     <Composer
       disabled={isThinking}
       onsend={(text) => void handleSend(text)}
+      onvoiceerror={(message) => pushEvent('ERROR', `voice input · ${message.slice(0, 160)}`)}
     />
   {/if}
 
