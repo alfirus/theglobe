@@ -16,6 +16,16 @@
 
 Closes #
 
+## Kanban
+
+Card: `t_644b7899` — P1-5 test + CI baseline (Vitest API/db tests, Playwright `@smoke`, GitHub Actions gate)
+
+<!--
+Name the kanban card this PR delivers, e.g. `t_644b7899`.
+QA sign-off (Balqis) is required before merge; the required status check is
+`check · unit · smoke · build` (see .github/workflows/ci.yml).
+-->
+
 ## ADR
 
 ADR: `<link to docs/adr/NNNN or 'n/a — not architecturally significant'>`
@@ -32,9 +42,9 @@ merged before this PR — CONTRIBUTING rule (docs/adr/README.md).
 ## Checklist
 
 - [ ] Architecturally significant change? → ADR merged first (see CONTRIBUTING rule)
-- [ ] `npm run type-check` passes
-- [ ] `npm run lint` passes
+- [ ] `npm run check` passes
 - [ ] `npm run test` passes
+- [ ] `npm run test:smoke` passes (headless, provider stubbed at the network layer)
 - [ ] `npm run build` succeeds
 - [ ] Code follows the project's coding standards
 - [ ] Self-reviewed my changes

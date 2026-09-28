@@ -1,0 +1,68 @@
+name: CI
+
+# P1-5 test + CI baseline (card t_644b7899).
+# Quality gate for every PR into main: install → type-check → unit tests →
+# Playwright smoke → build. The gate definitions live here; branch protection
+# (required status checks) is enforced separately by Shiela — the check name to
+# require is `check · unit · smoke · build`.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: check · unit · smoke · build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Type-check (svelte-check)
+        run: npm run check
+
+      - name: Unit tests (Vitest)
+        run: npm run test
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Smoke test (Playwright, headless)
+        run: npm run test:smoke
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Build
+        run: npm run build
