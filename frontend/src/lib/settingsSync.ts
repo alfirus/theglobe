@@ -27,12 +27,27 @@ export interface LocalProviderConfig {
 	baseUrl?: string;
 	model?: string;
 	apiKey?: string;
+	/** Per-uplink budget in ms (5 s – 10 min). */
+	timeoutMs?: number;
+}
+
+export interface LocalTtsConfig {
+	provider?: string;
+	voice?: string;
+	model?: string;
+	baseUrl?: string;
+	apiKey?: string;
+	modelPath?: string;
 }
 
 export interface LocalSettings {
 	provider?: string;
 	systemPrompt?: string;
 	configs?: Record<string, LocalProviderConfig>;
+	tts?: LocalTtsConfig;
+	uplinkMode?: string;
+	agent?: string;
+	agents?: Record<string, LocalProviderConfig>;
 	/** Older/unknown keys are preserved verbatim. */
 	[key: string]: unknown;
 }
@@ -41,7 +56,17 @@ export interface ServerConfigView {
 	baseUrl?: string;
 	model?: string;
 	hasKey?: boolean;
+	timeoutMs?: number;
 	/** Only reachable when an old server echoes it — never trusted as a key. */
+	[key: string]: unknown;
+}
+
+export interface ServerTtsView {
+	provider?: string;
+	voice?: string;
+	model?: string;
+	baseUrl?: string;
+	modelPath?: string;
 	[key: string]: unknown;
 }
 
@@ -49,6 +74,10 @@ export interface ServerSettingsView {
 	provider?: string;
 	systemPrompt?: string;
 	configs?: Record<string, ServerConfigView>;
+	tts?: ServerTtsView;
+	uplinkMode?: string;
+	agent?: string;
+	agents?: Record<string, ServerConfigView>;
 	[key: string]: unknown;
 }
 
@@ -124,6 +153,51 @@ export function mergeServerIntoLocal(
 		}
 	}
 
+	// Uplink mode + selected agent: same local-wins contract.
+	if (typeof local.uplinkMode !== 'string' || local.uplinkMode === '') {
+		if (typeof server.uplinkMode === 'string' && server.uplinkMode !== '') {
+			merged.uplinkMode = server.uplinkMode;
+		}
+	}
+	if (typeof local.agent !== 'string' || local.agent === '') {
+		if (typeof server.agent === 'string' && server.agent !== '') {
+			merged.agent = server.agent;
+		}
+	}
+
+	// Agent entries: same field contract as provider configs (local wins,
+	// server fills gaps, explicit `""` counts as set).
+	const serverAgents = server.agents;
+	if (serverAgents && typeof serverAgents === 'object') {
+		const agents: Record<string, LocalProviderConfig> = { ...(local.agents || {}) };
+		let touched = false;
+		for (const [id, cfg] of Object.entries(serverAgents)) {
+			if (!cfg || typeof cfg !== 'object') continue;
+			const current: LocalProviderConfig = { ...(agents[id] || {}) };
+			let entryTouched = false;
+			for (const field of ['baseUrl', 'model'] as const) {
+				const existing = current[field];
+				if (typeof existing === 'string') continue;
+				const fromServer = cfg[field];
+				if (typeof fromServer === 'string' && fromServer !== '') {
+					current[field] = fromServer;
+					entryTouched = true;
+				}
+			}
+			if (typeof current.timeoutMs !== 'number' || !Number.isFinite(current.timeoutMs)) {
+				if (typeof cfg.timeoutMs === 'number' && Number.isFinite(cfg.timeoutMs)) {
+					current.timeoutMs = cfg.timeoutMs;
+					entryTouched = true;
+				}
+			}
+			if (entryTouched) {
+				agents[id] = current;
+				touched = true;
+			}
+		}
+		if (touched || Object.keys(agents).length > 0) merged.agents = agents;
+	}
+
 	if (typeof local.systemPrompt !== 'string') {
 		if (typeof server.systemPrompt === 'string') merged.systemPrompt = server.systemPrompt;
 	}
@@ -148,6 +222,15 @@ export function mergeServerIntoLocal(
 				}
 			}
 
+			// Per-uplink timeout: a finite local number wins; otherwise the
+			// server's resolved budget fills the gap.
+			if (typeof current.timeoutMs !== 'number' || !Number.isFinite(current.timeoutMs)) {
+				if (typeof cfg.timeoutMs === 'number' && Number.isFinite(cfg.timeoutMs)) {
+					current.timeoutMs = cfg.timeoutMs;
+					entryTouched = true;
+				}
+			}
+
 			if (entryTouched) {
 				configs[id] = current;
 				touched = true;
@@ -155,6 +238,22 @@ export function mergeServerIntoLocal(
 		}
 
 		if (touched || Object.keys(configs).length > 0) merged.configs = configs;
+	}
+
+	// TTS engine block: same local-wins contract (an explicit "" is a clear).
+	const serverTts = server.tts;
+	if (serverTts && typeof serverTts === 'object') {
+		const current: LocalTtsConfig = { ...(local.tts ?? {}) };
+		let ttsTouched = false;
+		for (const field of ['provider', 'voice', 'model', 'baseUrl', 'modelPath'] as const) {
+			if (typeof current[field] === 'string') continue;
+			const fromServer = serverTts[field];
+			if (typeof fromServer === 'string' && fromServer !== '') {
+				current[field] = fromServer;
+				ttsTouched = true;
+			}
+		}
+		if (ttsTouched || Object.keys(current).length > 0) merged.tts = current;
 	}
 
 	return merged;

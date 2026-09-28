@@ -212,7 +212,7 @@
 	</div>
 
 	<div class="hints">
-		<span class="hint">J.A.R.V.I.S. · ambient listening armed</span>
+		    <span class="hint">THE GLOBE · ambient listening armed</span>
 		<span class="hint keys">⌘K CONVERSATIONS · ⌘, SETTINGS</span>
 	</div>
 </div>

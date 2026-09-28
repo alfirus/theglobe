@@ -2,10 +2,16 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import {
 	assertApiRequest,
+	isAgent,
 	isAllowedUrl,
 	isProvider,
+	isUplinkMode,
+	providerHeaders,
 	readSettings,
-	resolveConfig
+	resolveAgent,
+	resolveConfig,
+	type Agent,
+	type Provider
 } from '$lib/config';
 
 /** Request-shape caps (contract: POST /api/chat — see card t_afd2c465). */
@@ -17,24 +23,42 @@ const MAX_HISTORY_CONTENT = 16_000;
 type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
 async function callProvider(
+	providerId: Provider,
 	baseUrl: string,
 	apiKey: string,
 	model: string,
+	timeoutMs: number,
 	messages: ChatMessage[]
 ): Promise<Response> {
 	const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
 
-	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-	if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+	const headers: Record<string, string> = {
+		'Content-Type': 'application/json',
+		...providerHeaders(providerId, apiKey)
+	};
 
-	// Key material is never logged — only the endpoint and model.
-	console.log(`Calling provider at ${url} with model ${model}`);
+	// Key material is never logged — only the endpoint, model and budget.
+	console.log(`Calling provider at ${url} with model ${model} (timeout ${timeoutMs}ms)`);
 
-	const response = await fetch(url, {
-		method: 'POST',
-		headers,
-		body: JSON.stringify({ model, messages, stream: true })
-	});
+	let response: Response;
+	try {
+		response = await fetch(url, {
+			method: 'POST',
+			headers,
+			body: JSON.stringify({ model, messages, stream: true }),
+			// Per-uplink budget: the whole stream (headers + every chunk) must
+			// finish inside it. Expired → 504, not a silent hang.
+			signal: AbortSignal.timeout(timeoutMs)
+		});
+	} catch (err) {
+		if (err instanceof DOMException && err.name === 'TimeoutError') {
+			console.error(`Provider timeout (${url}) after ${timeoutMs}ms`);
+		const timeout = new Error(`Provider timed out after ${timeoutMs}ms`);
+		(timeout as NodeJS.ErrnoException).code = 'UPSTREAM_TIMEOUT';
+			throw timeout;
+		}
+		throw err;
+	}
 
 	if (!response.ok || !response.body) {
 		const status = response.status;
@@ -67,7 +91,21 @@ async function callProvider(
 						}
 						try {
 							const parsed = JSON.parse(data);
-							const content = parsed.choices?.[0]?.delta?.content;
+							const delta = parsed.choices?.[0]?.delta;
+							// Reasoning deltas ride alongside `content` on their own field:
+							// `reasoning_content` (MiMo, DeepSeek) or `reasoning`
+							// (OpenRouter). Relayed as `thinking` frames so the client
+							// can render them without mixing them into the answer.
+							const thinking =
+								(typeof delta?.reasoning_content === 'string' && delta.reasoning_content) ||
+								(typeof delta?.reasoning === 'string' && delta.reasoning) ||
+								'';
+							if (thinking) {
+								controller.enqueue(
+									new TextEncoder().encode(`data: ${JSON.stringify({ thinking })}\n\n`)
+								);
+							}
+							const content = delta?.content;
 							if (content) {
 								controller.enqueue(
 									new TextEncoder().encode(`data: ${JSON.stringify({ content })}\n\n`)
@@ -118,16 +156,35 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json({ error: `Message exceeds ${MAX_MESSAGE} characters` }, { status: 413 });
 	}
 
-	const providerId = request.headers.get('x-provider') || 'hermes';
-	if (!isProvider(providerId)) {
-		return json({ error: `Invalid provider: ${providerId}` }, { status: 400 });
+	// Uplink routing: `X-Uplink-Mode: agent` + `X-Agent: <id>` reaches a remote
+	// agent gateway; anything else (or a missing/garbage mode) is the classic
+	// provider path. Both resolve server-side — the body never carries secrets.
+	const uplinkMode = request.headers.get('x-uplink-mode') || 'provider';
+	if (!isUplinkMode(uplinkMode)) {
+		return json({ error: `Invalid uplink mode: ${uplinkMode}` }, { status: 400 });
 	}
 
 	const settings = readSettings();
-	const config = resolveConfig(providerId, settings);
+
+	let uplinkId: Provider | Agent;
+	if (uplinkMode === 'agent') {
+		const agentId = request.headers.get('x-agent') || 'hermes-agent';
+		if (!isAgent(agentId)) {
+			return json({ error: `Invalid agent: ${agentId}` }, { status: 400 });
+		}
+		uplinkId = agentId;
+	} else {
+		const providerId = request.headers.get('x-provider') || 'hermes';
+		if (!isProvider(providerId)) {
+			return json({ error: `Invalid provider: ${providerId}` }, { status: 400 });
+		}
+		uplinkId = providerId;
+	}
+
+	const config = isAgent(uplinkId) ? resolveAgent(uplinkId, settings) : resolveConfig(uplinkId, settings);
 
 	if (!config.baseUrl) {
-		return json({ error: `No base URL configured for ${providerId}` }, { status: 502 });
+		return json({ error: `No base URL configured for ${uplinkId}` }, { status: 502 });
 	}
 	if (!isAllowedUrl(config.baseUrl)) {
 		return json({ error: `URL not allowed: ${config.baseUrl}` }, { status: 400 });
@@ -156,9 +213,16 @@ export const POST: RequestHandler = async ({ request }) => {
 	messages.push({ role: 'user', content: message });
 
 	try {
-		return await callProvider(config.baseUrl, config.apiKey, config.model, messages);
+		// Agents speak the same OpenAI-compatible SSE surface in v1 — plain
+		// Bearer auth. The `providerId` param only picks auth headers, and no
+		// agent uses MiMo's `api-key` header, so providers pass their own id.
+		const authId: Provider = isAgent(uplinkId) ? 'hermes' : uplinkId;
+		return await callProvider(authId, config.baseUrl, config.apiKey, config.model, config.timeoutMs, messages);
 	} catch (err) {
 		console.error('Chat error:', err instanceof Error ? err.message : 'unknown error');
-		return json({ error: `Cannot connect to ${providerId}` }, { status: 503 });
+		if ((err as NodeJS.ErrnoException)?.code === 'UPSTREAM_TIMEOUT') {
+			return json({ error: `${uplinkId} timed out after ${config.timeoutMs}ms` }, { status: 504 });
+		}
+		return json({ error: `Cannot connect to ${uplinkId}` }, { status: 503 });
 	}
 };

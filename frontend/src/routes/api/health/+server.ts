@@ -2,23 +2,31 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import {
 	assertApiRequest,
+	isAgent,
 	isAllowedUrl,
 	isProvider,
+	providerHeaders,
 	readSettings,
-	resolveConfig
+	resolveAgent,
+	resolveConfig,
+	type Agent,
+	type Provider
 } from '$lib/config';
 import { errorFields, logEvent } from '$lib/log';
 
 const PROBE_TIMEOUT_MS = 5000;
+/** A per-uplink budget must still bound a probe: at most ~30 s per URL. */
+const MAX_PROBE_MS = 30_000;
 
 /**
- * POST /api/health — probe a configured provider (P1-2: surfaced health).
+ * POST /api/health — probe a configured provider or agent (P1-2: surfaced health).
  *
- * Body: `{ providerId, baseUrl? }`. `baseUrl` is optional: when it is omitted
- * the endpoint resolves the provider's stored base URL and API key itself, so
- * the UI can show health for the *server-side* configuration. That is the whole
- * point — a browser-side probe can never be right, because the key only exists
- * on the server (QA D2) and the provider has no CORS headers.
+ * Body: `{ providerId, baseUrl? }` or `{ agentId, baseUrl? }`. `baseUrl` is
+ * optional: when it is omitted the endpoint resolves the stored base URL and
+ * API key itself, so the UI can show health for the *server-side*
+ * configuration. That is the whole point — a browser-side probe can never be
+ * right, because the key only exists on the server (QA D2) and the upstream
+ * has no CORS headers.
  *
  * The caller-supplied `baseUrl`, when present, is validated against the upstream
  * allow-list before anything is fetched (M15/§4.1-2): this endpoint must never
@@ -37,24 +45,41 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json({ error: 'Invalid JSON body', code: 'invalid_request' }, { status: 400 });
 	}
 
-	const providerId = body.providerId;
 	const suppliedBaseUrl = typeof body.baseUrl === 'string' ? body.baseUrl.trim() : '';
 
-	if (!providerId) {
-		return json({ error: 'Provider ID is required', code: 'invalid_request' }, { status: 400 });
-	}
-	if (!isProvider(providerId)) {
-		return json({ error: `Invalid provider: ${providerId}`, code: 'invalid_provider' }, { status: 400 });
+	// Agent probe (`{ agentId }`) or provider probe (`{ providerId }`).
+	const agentId = typeof body.agentId === 'string' ? body.agentId : '';
+	const providerId = typeof body.providerId === 'string' ? body.providerId : '';
+
+	// After the guards below, exactly one branch assigns — the union carries
+	// the narrowing, so no casts are needed downstream.
+	let uplinkId: Agent | Provider;
+	if (agentId) {
+		if (!isAgent(agentId)) {
+			return json({ error: `Invalid agent: ${agentId}`, code: 'invalid_provider' }, { status: 400 });
+		}
+		uplinkId = agentId;
+	} else {
+		if (!providerId) {
+			return json({ error: 'Provider ID is required', code: 'invalid_request' }, { status: 400 });
+		}
+		if (!isProvider(providerId)) {
+			return json({ error: `Invalid provider: ${providerId}`, code: 'invalid_provider' }, { status: 400 });
+		}
+		uplinkId = providerId;
 	}
 
 	// Server-side resolution: stored (or env) base URL + key, never a wire key.
-	const resolved = resolveConfig(providerId, readSettings());
+	// `isAgent` narrows the union, so each branch gets its own resolver.
+	const resolved = isAgent(uplinkId)
+		? resolveAgent(uplinkId, readSettings())
+		: resolveConfig(uplinkId, readSettings());
 	const baseUrl = suppliedBaseUrl || resolved.baseUrl;
 	const apiKey = resolved.apiKey;
 
 	if (!baseUrl) {
 		return json(
-			{ error: `No base URL configured for ${providerId}`, code: 'not_configured' },
+			{ error: `No base URL configured for ${uplinkId}`, code: 'not_configured' },
 			{ status: 400 }
 		);
 	}
@@ -73,17 +98,24 @@ export const POST: RequestHandler = async ({ request }) => {
 	let responseTime = 0;
 	let error = '';
 
+	// The provider's own timeout caps the probe (a slow-LLM budget must not turn
+	// "Check Connection" into a 2-minute hang), clamped to a 30 s probe ceiling.
+	const probeMs = Math.min(resolved.timeoutMs, MAX_PROBE_MS);
+	const perUrlMs = Math.min(PROBE_TIMEOUT_MS, Math.max(1_000, Math.floor(probeMs / probes.length)));
+
+	// Agents take plain Bearer (none uses MiMo's `api-key` header).
+	const authId: Provider = isAgent(uplinkId) ? 'hermes' : uplinkId;
+
 	for (const url of probes) {
 		try {
 			const startTime = Date.now();
-			const headers: Record<string, string> = {};
-			if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+			const headers: Record<string, string> = { ...providerHeaders(authId, apiKey) };
 
 			const response = await fetch(url, {
 				method: 'GET',
 				headers,
 				redirect: 'manual',
-				signal: AbortSignal.timeout(PROBE_TIMEOUT_MS)
+				signal: AbortSignal.timeout(perUrlMs)
 			});
 
 			responseTime = Date.now() - startTime;
@@ -100,7 +132,7 @@ export const POST: RequestHandler = async ({ request }) => {
 	}
 
 	const result = {
-		providerId,
+		providerId: uplinkId,
 		baseUrl,
 		healthy,
 		responseTime,
@@ -111,7 +143,7 @@ export const POST: RequestHandler = async ({ request }) => {
 	logEvent(
 		'health',
 		'probe',
-		{ providerId, healthy, ms: responseTime, error: result.error || undefined },
+		{ providerId: uplinkId, healthy, ms: responseTime, error: result.error || undefined },
 		healthy ? 'debug' : 'warn'
 	);
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { loadEffectiveSettings } from '$lib/settingsSync';
+  import { pushEvent } from '$lib/events';
 
   export type Provider = 
     | 'hermes'
@@ -8,7 +9,13 @@
     | 'opencode'
     | 'openrouter'
     | 'deepseek'
-    | 'openclaw';
+    | 'openclaw'
+    | 'mimo';
+
+  export type TtsProvider = 'system' | 'piper' | 'edge' | 'openai' | 'elevenlabs';
+
+  export type Agent = 'hermes-agent' | 'openclaw-agent';
+  export type UplinkMode = 'provider' | 'agent';
 
   interface ProviderConfig {
     id: Provider;
@@ -16,9 +23,41 @@
     baseUrl: string;
     apiKey: string;
     model: string;
+    /** Per-uplink budget in ms — shown in seconds in the field. */
+    timeoutMs: number;
   }
 
-  const dispatch = createEventDispatcher<{ change: Provider }>();
+  interface TtsConfig {
+    provider: TtsProvider;
+    voice: string;
+    model: string;
+    baseUrl: string;
+    apiKey: string;
+    modelPath: string;
+  }
+
+  const TTS_ENGINES: { id: TtsProvider; name: string; hint: string }[] = [
+    { id: 'system', name: 'System voice', hint: 'OS-native · no setup' },
+    { id: 'piper', name: 'Piper', hint: 'Local neural · needs model' },
+    { id: 'edge', name: 'Edge TTS', hint: 'Free cloud · no key' },
+    { id: 'openai', name: 'OpenAI TTS', hint: 'Cloud · API key' },
+    { id: 'elevenlabs', name: 'ElevenLabs', hint: 'Premium · API key' }
+  ];
+
+  const DEFAULT_TIMEOUT_MS = 120_000;
+
+  export interface UplinkSelection {
+    mode: UplinkMode;
+    provider: Provider;
+    agent: Agent;
+  }
+
+  const dispatch = createEventDispatcher<{ change: Provider | UplinkSelection }>();
+
+  /** Tell the host page which uplink carries chat (mode + both selections). */
+  function notifyUplink(): void {
+    dispatch('change', { mode: uplinkMode, provider: selectedProvider, agent: selectedAgent });
+  }
 
   let {
     initialProvider = 'hermes',
@@ -36,10 +75,28 @@
   // mode never re-renders, so the badge/timestamp never moved (M11).
   let providerHealth = $state<Record<string, { status: 'unknown' | 'healthy' | 'unhealthy'; lastChecked?: number }>>({});
 
+  interface AgentConfig {
+    id: Agent;
+    name: string;
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    timeoutMs: number;
+  }
+
+  const AGENT_ENTRIES: { id: Agent; name: string; hint: string }[] = [
+    { id: 'hermes-agent', name: 'Hermes Agent', hint: 'Remote agent · sessions + tools' },
+    { id: 'openclaw-agent', name: 'OpenClaw', hint: 'Remote agent · gateway' }
+  ];
+
   interface StoredSettings {
     provider?: Provider;
     systemPrompt?: string;
     configs?: Record<string, Partial<ProviderConfig>>;
+    tts?: Partial<TtsConfig>;
+    uplinkMode?: UplinkMode;
+    agent?: Agent;
+    agents?: Record<string, Partial<AgentConfig>>;
   }
 
   function readStoredSettings(): StoredSettings {
@@ -64,6 +121,17 @@
     return out;
   }
 
+  /** Same key-strip for the agent namespace (separate type, same rule). */
+  function stripAgentKeys(agents: StoredSettings['agents']): StoredSettings['agents'] {
+    const out: NonNullable<StoredSettings['agents']> = {};
+    for (const [id, cfg] of Object.entries(agents || {})) {
+      if (!cfg) continue;
+      const { apiKey: _keptOnServer, ...rest } = cfg;
+      out[id] = rest;
+    }
+    return out;
+  }
+
   /**
    * Fields the user actually edited during this session (QA defect D3).
    *
@@ -76,12 +144,28 @@
    *
    * Deliberately not `$state`: nothing renders it, it only feeds persistence.
    */
-  type EditableField = 'baseUrl' | 'model' | 'apiKey';
+  type EditableField = 'baseUrl' | 'model' | 'apiKey' | 'timeoutMs';
+  type TtsEditableField = 'provider' | 'voice' | 'model' | 'baseUrl' | 'apiKey' | 'modelPath';
   const edited = {
     provider: false,
     systemPrompt: false,
-    configs: {} as Record<string, Set<EditableField>>
+    configs: {} as Record<string, Set<EditableField>>,
+    tts: new Set<TtsEditableField>(),
+    uplinkMode: false,
+    agent: false,
+    agents: {} as Record<string, Set<EditableField>>
   };
+
+  function markAgentEdited(id: Agent, field: EditableField): void {
+    const fields = edited.agents[id];
+    if (fields) fields.add(field);
+    else edited.agents[id] = new Set([field]);
+  }
+
+  function editedAgentFields(id: Agent): EditableField[] {
+    const fields = edited.agents[id];
+    return fields ? [...fields] : [];
+  }
 
   function markEdited(id: Provider, field: EditableField): void {
     const fields = edited.configs[id];
@@ -94,8 +178,16 @@
     return fields ? [...fields] : [];
   }
 
-  function hasEdits(providerId: Provider): boolean {
-    return edited.provider || edited.systemPrompt || editedFields(providerId).length > 0;
+  function hasEdits(providerId: Provider, agentId: Agent): boolean {
+    return (
+      edited.provider ||
+      edited.systemPrompt ||
+      editedFields(providerId).length > 0 ||
+      edited.tts.size > 0 ||
+      edited.uplinkMode ||
+      edited.agent ||
+      editedAgentFields(agentId).length > 0
+    );
   }
 
   /** Everything edited has been stored → the next change starts clean. */
@@ -103,6 +195,10 @@
     edited.provider = false;
     edited.systemPrompt = false;
     edited.configs = {};
+    edited.tts = new Set();
+    edited.uplinkMode = false;
+    edited.agent = false;
+    edited.agents = {};
   }
 
   /**
@@ -127,10 +223,11 @@
    */
   async function persistSettings(): Promise<boolean> {
     const config = providers[selectedProvider];
-    if (!config) return false;
+    const agentConfig = agents[selectedAgent];
+    if (!config || !agentConfig) return false;
     // Nothing was edited (e.g. a re-click of the already-active card): a POST
     // here would have nothing to say and nothing to risk.
-    if (!hasEdits(selectedProvider)) return true;
+    if (!hasEdits(selectedProvider, selectedAgent)) return true;
 
     const stored = readStoredSettings();
 
@@ -139,8 +236,12 @@
       if (field === 'apiKey') {
         // Write-only: an empty key field means "leave the stored key alone".
         if (config.apiKey) patch.apiKey = config.apiKey;
+      } else if (field === 'timeoutMs') {
+        patch.timeoutMs = config.timeoutMs;
+      } else if (field === 'baseUrl') {
+        patch.baseUrl = config.baseUrl;
       } else {
-        patch[field] = config[field];
+        patch.model = config.model;
       }
     }
     const hasConfigPatch = Object.keys(patch).length > 0;
@@ -150,19 +251,69 @@
       ...(hasConfigPatch ? { [selectedProvider]: patch } : {})
     };
 
+    // TTS engine block: same edited-only contract; the key is write-only.
+    const ttsPatch: Partial<TtsConfig> = {};
+    for (const field of edited.tts) {
+      if (field === 'apiKey') {
+        if (tts.apiKey) ttsPatch.apiKey = tts.apiKey;
+      } else if (field === 'provider') {
+        ttsPatch.provider = tts.provider;
+      } else if (field === 'voice') {
+        ttsPatch.voice = tts.voice;
+      } else if (field === 'model') {
+        ttsPatch.model = tts.model;
+      } else if (field === 'baseUrl') {
+        ttsPatch.baseUrl = tts.baseUrl;
+      } else {
+        ttsPatch.modelPath = tts.modelPath;
+      }
+    }
+    const hasTtsPatch = Object.keys(ttsPatch).length > 0;
+    const nextTts: StoredSettings['tts'] = { ...(stored.tts || {}), ...ttsPatch };
+
+    // Agent uplink block: same edited-only contract; the key is write-only.
+    const agentPatch: Partial<AgentConfig> = {};
+    for (const field of editedAgentFields(selectedAgent)) {
+      if (field === 'apiKey') {
+        if (agentConfig.apiKey) agentPatch.apiKey = agentConfig.apiKey;
+      } else if (field === 'timeoutMs') {
+        agentPatch.timeoutMs = agentConfig.timeoutMs;
+      } else if (field === 'baseUrl') {
+        agentPatch.baseUrl = agentConfig.baseUrl;
+      } else {
+        agentPatch.model = agentConfig.model;
+      }
+    }
+    const hasAgentPatch = Object.keys(agentPatch).length > 0;
+    const nextAgents: NonNullable<StoredSettings['agents']> = {
+      ...(stored.agents || {}),
+      ...(hasAgentPatch ? { [selectedAgent]: agentPatch } : {})
+    };
+
     const localProvider =
       edited.provider || typeof stored.provider === 'string' ? selectedProvider : undefined;
     const localPrompt =
       edited.systemPrompt || typeof stored.systemPrompt === 'string' ? systemPrompt : undefined;
+    const localMode =
+      edited.uplinkMode || typeof stored.uplinkMode === 'string' ? uplinkMode : undefined;
+    const localAgent =
+      edited.agent || typeof stored.agent === 'string' ? selectedAgent : undefined;
 
     try {
+      // localStorage copy: LLM configs without keys, TTS without the key,
+      // agents without keys.
+      const { apiKey: _ttsKey, ...ttsLocal } = nextTts;
       localStorage.setItem(
         'globe-settings',
         JSON.stringify({
           ...stored,
           ...(localProvider !== undefined ? { provider: localProvider } : {}),
           ...(localPrompt !== undefined ? { systemPrompt: localPrompt } : {}),
-          configs: stripKeys(nextConfigs)
+          ...(localMode !== undefined ? { uplinkMode: localMode } : {}),
+          ...(localAgent !== undefined ? { agent: localAgent } : {}),
+          configs: stripKeys(nextConfigs),
+          ...(Object.keys(ttsLocal).length > 0 ? { tts: ttsLocal } : {}),
+          agents: stripAgentKeys(nextAgents)
         })
       );
     } catch (err) {
@@ -176,11 +327,23 @@
         body: JSON.stringify({
           provider: selectedProvider,
           ...(edited.systemPrompt ? { systemPrompt } : {}),
-          ...(hasConfigPatch ? { configs: { [selectedProvider]: patch } } : {})
+          ...(hasConfigPatch ? { configs: { [selectedProvider]: patch } } : {}),
+          ...(hasTtsPatch ? { tts: ttsPatch } : {}),
+          ...(edited.uplinkMode ? { uplinkMode } : {}),
+          ...(edited.agent ? { agent: selectedAgent } : {}),
+          ...(hasAgentPatch ? { agents: { [selectedAgent]: agentPatch } } : {})
         })
       });
       if (res.ok) {
         if (config.apiKey) keySaved = true;
+        if (agentConfig.apiKey) {
+          agentKeySaved = true;
+          agentConfig.apiKey = '';
+        }
+        if (tts.apiKey) {
+          ttsKeySaved = true;
+          tts.apiKey = '';
+        }
         clearEdited();
         return true;
       }
@@ -220,7 +383,19 @@
   interface SettingsView {
     provider?: string;
     systemPrompt?: string;
-    configs?: Record<string, { baseUrl?: string; model?: string; apiKey?: string }>;
+    configs?: Record<string, { baseUrl?: string; model?: string; apiKey?: string; timeoutMs?: number }>;
+    tts?: {
+      provider?: string;
+      voice?: string;
+      model?: string;
+      baseUrl?: string;
+      apiKey?: string;
+      modelPath?: string;
+      hasKey?: boolean;
+    };
+    uplinkMode?: string;
+    agent?: string;
+    agents?: Record<string, { baseUrl?: string; model?: string; apiKey?: string; timeoutMs?: number }>;
   }
 
   /**
@@ -232,17 +407,49 @@
       selectedProvider = saved.provider as Provider;
     }
     if (typeof saved.systemPrompt === 'string') systemPrompt = saved.systemPrompt;
+    if (saved.uplinkMode === 'provider' || saved.uplinkMode === 'agent') {
+      uplinkMode = saved.uplinkMode;
+    }
+    if (saved.agent && agents[saved.agent as Agent]) {
+      selectedAgent = saved.agent as Agent;
+    }
+    for (const [id, config] of Object.entries(saved.agents || {})) {
+      const target = agents[id as Agent];
+      if (!target || !config) continue;
+      if (typeof config.baseUrl === 'string') target.baseUrl = config.baseUrl;
+      if (typeof config.model === 'string') target.model = config.model;
+      if (typeof config.timeoutMs === 'number' && Number.isFinite(config.timeoutMs)) {
+        target.timeoutMs = Math.min(Math.max(Math.round(config.timeoutMs), 5_000), 600_000);
+      }
+    }
 
     let scrubbed = false;
     for (const [id, config] of Object.entries(saved.configs || {})) {
       const target = providers[id as Provider];
       if (!target || !config) continue;
-      // baseUrl/model come back; apiKey never does — the field is write-only.
+      // baseUrl/model/timeout come back; apiKey never does — the field is write-only.
       if (typeof config.baseUrl === 'string') target.baseUrl = config.baseUrl;
       if (typeof config.model === 'string') target.model = config.model;
+      if (typeof config.timeoutMs === 'number' && Number.isFinite(config.timeoutMs)) {
+        target.timeoutMs = Math.min(Math.max(Math.round(config.timeoutMs), 5_000), 600_000);
+      }
       if (config.apiKey) {
         scrubbed = true;
         delete config.apiKey;
+      }
+    }
+    // TTS engine block: provider + per-engine fields; apiKey never comes back.
+    if (saved.tts && typeof saved.tts === 'object') {
+      const incoming = saved.tts;
+      if (incoming.provider && TTS_ENGINES.some((e) => e.id === incoming.provider)) {
+        tts.provider = incoming.provider as TtsProvider;
+      }
+      for (const field of ['voice', 'model', 'baseUrl', 'modelPath'] as const) {
+        if (typeof incoming[field] === 'string') tts[field] = incoming[field] as string;
+      }
+      if (incoming.apiKey) {
+        scrubbed = true;
+        delete incoming.apiKey;
       }
     }
     return scrubbed;
@@ -258,7 +465,7 @@
       try {
         localStorage.setItem(
           'globe-settings',
-          JSON.stringify({ ...saved, configs: stripKeys(saved.configs) })
+          JSON.stringify({ ...saved, configs: stripKeys(saved.configs), agents: stripAgentKeys(saved.agents) })
         );
       } catch (err) {
         console.error('Failed to scrub stored API keys:', err);
@@ -280,6 +487,8 @@
     applyStoredSettings(merged);
     // After hydration: whichever provider won, report its key status.
     await refreshKeyStatus();
+    await refreshTtsKeyStatus();
+    await refreshAgentKeyStatus();
   }
 
   /**
@@ -292,28 +501,52 @@
    * /api/health` resolves the base URL *and* the key server-side, exactly like
    * `/api/chat` does — the body carries only the provider id.
    */
+  // Last server-reported probe detail (e.g. `URL not allowed`, `fetch failed`,
+  // `HTTP 401`) shown under the LINKED / NO SIGNAL word so a failure says why.
+  let providerHealthDetail = $state<Record<string, string>>({});
+
   async function checkProviderHealth(providerId: Provider) {
-    // No client-side short-circuit: this browser's copy can be empty (fresh
-    // profile, hydration still in flight) while the server already holds a
-    // working config, and a failed badge on that provider is exactly the bug.
+    await checkUplinkHealth({ providerId });
+  }
+
+  async function checkAgentHealth(agentId: Agent) {
+    await checkUplinkHealth({ agentId });
+  }
+
+  /** Shared probe: `{ providerId }` or `{ agentId }` — the server resolves both. */
+  async function checkUplinkHealth(body: { providerId?: Provider; agentId?: Agent }) {
+    const uplinkId = body.agentId ?? body.providerId ?? selectedProvider;
+    // Flush unsaved edits first: the probe resolves base URL + key server-side,
+    // so without this it would test the last-saved config — not what the user
+    // just typed — and the badge would lie until the next save.
+    await persistSettings();
     try {
       const res = await fetch('/api/health', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ providerId }),
+        body: JSON.stringify(body),
         // Server-side probe budget: up to two candidate URLs × 5 s each.
         signal: AbortSignal.timeout(15_000)
       });
       const data: unknown = res.ok ? await res.json() : null;
       const healthy =
         !!data && typeof data === 'object' && (data as { healthy?: unknown }).healthy === true;
+      const detail =
+        !!data && typeof data === 'object'
+          ? String((data as { error?: unknown }).error ?? '')
+          : res.ok
+            ? ''
+            : `HTTP ${res.status}`;
+      pushEvent(healthy ? 'LINK' : 'ERROR', `${uplinkId} check: ${healthy ? 'linked' : detail || 'failed'}`);
 
-      providerHealth[providerId] = {
+      providerHealth[uplinkId] = {
         status: healthy ? 'healthy' : 'unhealthy',
         lastChecked: Date.now()
       };
+      providerHealthDetail[uplinkId] = healthy ? '' : detail;
     } catch {
-      providerHealth[providerId] = { status: 'unhealthy', lastChecked: Date.now() };
+      providerHealth[uplinkId] = { status: 'unhealthy', lastChecked: Date.now() };
+      providerHealthDetail[uplinkId] = 'Request failed';
     }
   }
 
@@ -348,7 +581,7 @@
     selectedProvider = id;
     // The selection itself is an edit: it is the one thing a card click means.
     edited.provider = true;
-    dispatch('change', id);
+    notifyUplink();
     void persistSettings();
     void refreshKeyStatus();
     void handleHealthCheck();
@@ -371,6 +604,137 @@
     await persistSettings();
   }
 
+  // Per-uplink timeout edit (seconds in the field, ms in state/settings).
+  // Non-numeric or out-of-range input is clamped, never rejected with a throw.
+  async function handleTimeoutChange(raw: string) {
+    const secs = Number(raw);
+    const ms = Number.isFinite(secs) && secs > 0 ? Math.round(secs * 1000) : DEFAULT_TIMEOUT_MS;
+    const config = providers[selectedProvider];
+    if (config) config.timeoutMs = Math.min(Math.max(ms, 5_000), 600_000);
+    markEdited(selectedProvider, 'timeoutMs');
+    await persistSettings();
+  }
+
+  function timeoutSecs(providerId: Provider): string {
+    const ms = providers[providerId]?.timeoutMs;
+    return typeof ms === 'number' && Number.isFinite(ms) && ms > 0
+      ? String(Math.round(ms / 1000))
+      : String(Math.round(DEFAULT_TIMEOUT_MS / 1000));
+  }
+
+  // TTS engine edits: same edited-only contract as the LLM providers; the key
+  // is write-only and cleared from state once the server accepts it.
+  async function handleTtsSelect(id: TtsProvider) {
+    tts.provider = id;
+    edited.tts.add('provider');
+    await persistSettings();
+    await refreshTtsKeyStatus();
+  }
+
+  async function handleTtsFieldChange(field: 'voice' | 'model' | 'baseUrl' | 'modelPath') {
+    edited.tts.add(field);
+    await persistSettings();
+  }
+
+  async function handleTtsApiKeyChange() {
+    edited.tts.add('apiKey');
+    await persistSettings();
+  }
+
+  // Agent uplink state: which section carries chat + which agent entry.
+  let uplinkMode = $state<UplinkMode>('provider');
+  let selectedAgent = $state<Agent>('hermes-agent');
+  let agentKeySaved = $state(false);
+
+  async function refreshAgentKeyStatus(): Promise<void> {
+    try {
+      const res = await fetch('/api/settings', { headers: { Accept: 'application/json' } });
+      if (!res.ok) return;
+      const data = await res.json();
+      const cfg = data?.agents?.[selectedAgent];
+      if (cfg && typeof cfg.hasKey === 'boolean') agentKeySaved = cfg.hasKey;
+    } catch {
+      // Offline or pre-upgrade server: we simply don't know.
+    }
+  }
+
+  async function handleUplinkModeSelect(mode: UplinkMode) {
+    uplinkMode = mode;
+    edited.uplinkMode = true;
+    notifyUplink();
+    await persistSettings();
+    if (mode === 'agent') {
+      await refreshAgentKeyStatus();
+      await checkAgentHealth(selectedAgent);
+    } else {
+      await refreshKeyStatus();
+      await handleHealthCheck();
+    }
+  }
+
+  async function handleAgentSelect(id: Agent) {
+    selectedAgent = id;
+    edited.agent = true;
+    notifyUplink();
+    await persistSettings();
+    await refreshAgentKeyStatus();
+    await checkAgentHealth(id);
+  }
+
+  async function handleAgentFieldChange(field: 'baseUrl' | 'model') {
+    markAgentEdited(selectedAgent, field);
+    await persistSettings();
+  }
+
+  async function handleAgentTimeoutChange(raw: string) {
+    const secs = Number(raw);
+    const ms = Number.isFinite(secs) && secs > 0 ? Math.round(secs * 1000) : DEFAULT_TIMEOUT_MS;
+    const target = agents[selectedAgent];
+    if (target) target.timeoutMs = Math.min(Math.max(ms, 5_000), 600_000);
+    markAgentEdited(selectedAgent, 'timeoutMs');
+    await persistSettings();
+  }
+
+  function agentTimeoutSecs(agentId: Agent): string {
+    const ms = agents[agentId]?.timeoutMs;
+    return typeof ms === 'number' && Number.isFinite(ms) && ms > 0
+      ? String(Math.round(ms / 1000))
+      : String(Math.round(DEFAULT_TIMEOUT_MS / 1000));
+  }
+
+  async function handleAgentApiKeyChange() {
+    markAgentEdited(selectedAgent, 'apiKey');
+    const savedToServer = await persistSettings();
+    const target = agents[selectedAgent];
+    if (savedToServer && target?.apiKey) {
+      target.apiKey = '';
+      agentKeySaved = true;
+    }
+  }
+
+  async function handleAgentHealthCheck() {
+    if (selectedAgent && agents[selectedAgent]) {
+      await checkAgentHealth(selectedAgent);
+    }
+  }
+
+  // `true` when the server already holds a key for the active TTS engine.
+  let ttsKeySaved = $state(false);
+
+  async function refreshTtsKeyStatus(): Promise<void> {
+    try {
+      const res = await fetch('/api/settings', { headers: { Accept: 'application/json' } });
+      if (!res.ok) return;
+      const data = await res.json();
+      const cfg = data?.tts;
+      if (cfg && typeof cfg.hasKey === 'boolean') ttsKeySaved = cfg.hasKey;
+    } catch {
+      // Offline or pre-upgrade server: we simply don't know.
+    }
+  }
+
+
+
   // Write-only API key field: the value is POSTed to the server and then dropped
   // from component state, so it can never be written to localStorage. What the
   // UI keeps is only the fact that a key exists ("saved on server").
@@ -392,51 +756,50 @@
 
   // `$state` so `bind:value` edits are visible to sibling reads (health check,
   // the config header) instead of living only inside the input element.
+  function blankProviderConfig(id: Provider, name: string, baseUrl = '', model = ''): ProviderConfig {
+    return { id, name, baseUrl, apiKey: '', model, timeoutMs: DEFAULT_TIMEOUT_MS };
+  }
   let providers = $state<Record<Provider, ProviderConfig>>({
-    hermes: {
-      id: 'hermes',
-      name: 'Hermes Agent AI Platform',
+    hermes: blankProviderConfig('hermes', 'Hermes Agent AI Platform', '', 'hermes-agent'),
+    // Product default: LM Studio's own loopback port. Never a test-stub port —
+    // an e2e mock once leaked `127.0.0.1:5224/v1` into the owner's config.
+    lmstudio: blankProviderConfig('lmstudio', 'LM Studio (Local)', 'http://127.0.0.1:1234/v1'),
+    opencode: blankProviderConfig('opencode', 'OpenCode Zen and Go', 'http://localhost:8765/v1'),
+    openrouter: blankProviderConfig('openrouter', 'OpenRouter', 'https://openrouter.ai/api/v1'),
+    deepseek: blankProviderConfig('deepseek', 'DeepSeek', 'https://api.deepseek.com/v1', 'deepseek-chat'),
+    openclaw: blankProviderConfig('openclaw', 'OpenClaw AI Platform'),
+    mimo: blankProviderConfig('mimo', 'Xiaomi MiMo', 'https://api.xiaomimimo.com/v1', 'mimo-v2-flash')
+  });
+
+  // Agent uplink entries (remote Hermes / OpenClaw gateways) — separate
+  // namespace from providers, same write-only-key contract.
+  let agents = $state<Record<Agent, AgentConfig>>({
+    'hermes-agent': {
+      id: 'hermes-agent',
+      name: 'Hermes Agent',
       baseUrl: '',
       apiKey: '',
-      model: 'hermes-agent'
+      model: 'hermes-agent',
+      timeoutMs: DEFAULT_TIMEOUT_MS
     },
-    lmstudio: {
-      id: 'lmstudio',
-      name: 'LM Studio (Local)',
-      // Product default: LM Studio's own loopback port. Never a test-stub port —
-      // an e2e mock once leaked `127.0.0.1:5224/v1` into the owner's config.
-      baseUrl: 'http://127.0.0.1:1234/v1',
-      apiKey: '',
-      model: ''
-    },
-    opencode: {
-      id: 'opencode',
-      name: 'OpenCode Zen and Go',
-      baseUrl: 'http://localhost:8765/v1',
-      apiKey: '',
-      model: ''
-    },
-    openrouter: {
-      id: 'openrouter',
-      name: 'OpenRouter',
-      baseUrl: 'https://openrouter.ai/api/v1',
-      apiKey: '',
-      model: ''
-    },
-    deepseek: {
-      id: 'deepseek',
-      name: 'DeepSeek',
-      baseUrl: 'https://api.deepseek.com/v1',
-      apiKey: '',
-      model: 'deepseek-chat'
-    },
-    openclaw: {
-      id: 'openclaw',
-      name: 'OpenClaw AI Platform',
+    'openclaw-agent': {
+      id: 'openclaw-agent',
+      name: 'OpenClaw',
       baseUrl: '',
       apiKey: '',
-      model: ''
+      model: '',
+      timeoutMs: DEFAULT_TIMEOUT_MS
     }
+  });
+
+  // TTS engine state (Hermes-style engine table; `system` = OS-native default).
+  let tts = $state<TtsConfig>({
+    provider: 'system',
+    voice: '',
+    model: '',
+    baseUrl: '',
+    apiKey: '',
+    modelPath: ''
   });
 
   // Restore whatever the owner configured last session (provider, prompt, configs).
@@ -472,6 +835,9 @@
       <circle cx="12" cy="12" r="8.5"></circle>
       <circle cx="12" cy="12" r="3"></circle>
       <path d="M12 1.9v3.3M12 18.8v3.3M1.9 12h3.3M18.8 12h3.3"></path>
+    {:else if id === 'mimo'}
+      <path d="M4 16.5l3.5-9 3.2 6.5 3.2-9.5 3.1 8L20.5 8"></path>
+      <path d="M4 19.5h16"></path>
     {:else}
       <path d="M7 5.4c-.9 5.3 1.3 8.7 5 9.8 3.7-1.1 5.9-4.5 5-9.8"></path>
       <path d="M9.6 17.4h4.8"></path>
@@ -495,7 +861,7 @@
 {#if open}
   <button class="backdrop" aria-label="Close settings" onclick={toggle}></button>
 
-  <div class="settings-modal" role="dialog" aria-modal="true" aria-label="LLM Provider Settings">
+  <div class="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
     <span class="corner tl" aria-hidden="true"></span>
     <span class="corner tr" aria-hidden="true"></span>
     <span class="corner bl" aria-hidden="true"></span>
@@ -510,12 +876,33 @@
               <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"></path>
             </svg>
           </span>
-          LLM Provider Settings
+          Settings
         </h2>
         <button class="close-btn" onclick={toggle} title="Close" aria-label="Close settings">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6">
             <path d="M6 6l12 12M18 6L6 18"></path>
           </svg>
+        </button>
+      </div>
+
+      <!-- Uplink mode: stateless providers vs stateful remote agents. Only the
+           active section carries chat. -->
+      <div class="uplink-switch" role="group" aria-label="Uplink mode">
+        <button
+          class="uplink-tab {uplinkMode === 'provider' ? 'active' : ''}"
+          aria-pressed={uplinkMode === 'provider'}
+          onclick={() => handleUplinkModeSelect('provider')}
+        >
+          <span class="uplink-tab-key">PROVIDER UPLINK</span>
+          <span class="uplink-tab-hint">Stateless chat endpoints</span>
+        </button>
+        <button
+          class="uplink-tab {uplinkMode === 'agent' ? 'active' : ''}"
+          aria-pressed={uplinkMode === 'agent'}
+          onclick={() => handleUplinkModeSelect('agent')}
+        >
+          <span class="uplink-tab-key">AGENT UPLINK</span>
+          <span class="uplink-tab-hint">Remote Hermes / OpenClaw</span>
         </button>
       </div>
 
@@ -563,6 +950,9 @@
               {/if}
             </span>
             <span class="health-word">{healthWord(providerHealth[selectedProvider]?.status || 'unknown')}</span>
+            {#if providerHealthDetail[selectedProvider]}
+              <small class="health-error">{providerHealthDetail[selectedProvider]}</small>
+            {/if}
             {#if providerHealth[selectedProvider]?.lastChecked}
               <small class="health-time">{healthTime(providerHealth[selectedProvider]?.lastChecked)}</small>
             {/if}
@@ -615,6 +1005,21 @@
             />
           </div>
 
+          <div class="form-group">
+            <label for="cfg-timeout">Uplink timeout (seconds)</label>
+            <input
+              id="cfg-timeout"
+              type="number"
+              min="5"
+              max="600"
+              step="1"
+              value={timeoutSecs(selectedProvider)}
+              placeholder="120"
+              onchange={(e) => handleTimeoutChange(e.currentTarget.value)}
+            />
+            <small class="field-hint">Budget for this uplink: chat stream + health probe (5–600 s).</small>
+          </div>
+
           <!-- System Prompt -->
           <div class="form-group">
             <label for="cfg-prompt">System Prompt (Optional)</label>
@@ -626,10 +1031,314 @@
               onchange={handleSystemPromptChange}
             ></textarea>
           </div>
-
-          <button class="btn-bracket gold save-btn" onclick={toggle}>Save &amp; Close</button>
         </div>
       {/if}
+
+      <!-- Agent uplink: remote Hermes / OpenClaw gateways. Carries chat only
+           when the AGENT UPLINK tab is active. -->
+      <div class="provider-list" role="group" aria-label="Agent uplink">
+        <span class="section-label">Agent uplink</span>
+        {#if uplinkMode !== 'agent'}
+          <small class="field-hint">Idle — select AGENT UPLINK above to route chat here.</small>
+        {/if}
+
+        {#each AGENT_ENTRIES as entry}
+          {@const agent = agents[entry.id]}
+          <button
+            class="provider-card {selectedAgent === entry.id ? 'active' : ''}"
+            aria-pressed={selectedAgent === entry.id}
+            onclick={() => handleAgentSelect(entry.id)}
+          >
+            <span class="provider-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6">
+                {#if entry.id === 'hermes-agent'}
+                  <circle cx="12" cy="12" r="2.6"></circle>
+                  <ellipse cx="12" cy="12" rx="9.3" ry="4.3" transform="rotate(-28 12 12)"></ellipse>
+                  <ellipse cx="12" cy="12" rx="9.3" ry="4.3" transform="rotate(28 12 12)"></ellipse>
+                {:else}
+                  <path d="M7 5.4c-.9 5.3 1.3 8.7 5 9.8 3.7-1.1 5.9-4.5 5-9.8"></path>
+                  <path d="M9.6 17.4h4.8"></path>
+                  <circle cx="12" cy="19.9" r="1.5"></circle>
+                {/if}
+              </svg>
+            </span>
+            <span class="provider-name">{entry.name}</span>
+            <span class="engine-hint">{entry.hint}</span>
+            {#if selectedAgent === entry.id && uplinkMode === 'agent'}
+              <span class="selected-badge">✓ Active</span>
+            {/if}
+          </button>
+        {/each}
+      </div>
+
+      {#if agents[selectedAgent]}
+        <div class="config-section">
+          <h3 class="config-title">Configure: {agents[selectedAgent].name}</h3>
+
+          <div class="health-status">
+            <span class="health-label">Connection Status</span>
+            <span class="health-mark" data-status={providerHealth[selectedAgent]?.status || 'unknown'}>
+              {#if (providerHealth[selectedAgent]?.status || 'unknown') === 'healthy'}
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6">
+                  <path d="M5 12.5l4.5 4.5L19 7.5"></path>
+                </svg>
+              {:else if providerHealth[selectedAgent]?.status === 'unhealthy'}
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6">
+                  <path d="M6 6l12 12M18 6L6 18"></path>
+                </svg>
+              {:else}
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6">
+                  <path d="M5 12h14"></path>
+                </svg>
+              {/if}
+            </span>
+            <span class="health-word">{healthWord(providerHealth[selectedAgent]?.status || 'unknown')}</span>
+            {#if providerHealthDetail[selectedAgent]}
+              <small class="health-error">{providerHealthDetail[selectedAgent]}</small>
+            {/if}
+            {#if providerHealth[selectedAgent]?.lastChecked}
+              <small class="health-time">{healthTime(providerHealth[selectedAgent]?.lastChecked)}</small>
+            {/if}
+            <button class="btn-bracket check-health-btn" onclick={handleAgentHealthCheck}>
+              Check Connection
+            </button>
+          </div>
+
+          <div class="form-group">
+            <label for="agent-base-url">Gateway URL</label>
+            <input
+              id="agent-base-url"
+              type="text"
+              bind:value={agents[selectedAgent].baseUrl}
+              placeholder="e.g., http://192.168.1.20:8000/v1"
+              onchange={() => handleAgentFieldChange('baseUrl')}
+            />
+            <small class="field-hint">Remote Hermes / OpenClaw gateway — loopback, LAN, or Tailscale.</small>
+          </div>
+
+          <div class="form-group">
+            <label for="agent-api-key">
+              API Key (optional)
+              {#if agentKeySaved}
+                <span class="key-saved">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                    <path d="M5 12.5l4.5 4.5L19 7.5"></path>
+                  </svg>
+                  saved on server
+                </span>
+              {/if}
+            </label>
+            <input
+              id="agent-api-key"
+              type="password"
+              bind:value={agents[selectedAgent].apiKey}
+              placeholder={agentKeySaved ? '•••••••• (stored on the server)' : 'sk-...'}
+              onchange={handleAgentApiKeyChange}
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="agent-model">Model</label>
+            <input
+              id="agent-model"
+              type="text"
+              bind:value={agents[selectedAgent].model}
+              placeholder="e.g., hermes-agent"
+              onchange={() => handleAgentFieldChange('model')}
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="agent-timeout">Uplink timeout (seconds)</label>
+            <input
+              id="agent-timeout"
+              type="number"
+              min="5"
+              max="600"
+              step="1"
+              value={agentTimeoutSecs(selectedAgent)}
+              placeholder="120"
+              onchange={(e) => handleAgentTimeoutChange(e.currentTarget.value)}
+            />
+            <small class="field-hint">Budget for this uplink: chat stream + health probe (5–600 s).</small>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Voice output (TTS engine table) -->
+      <div class="provider-list" role="group" aria-label="Voice output engines">
+        <span class="section-label">Voice output</span>
+
+        {#each TTS_ENGINES as engine}
+          <button
+            class="provider-card {tts.provider === engine.id ? 'active' : ''}"
+            aria-pressed={tts.provider === engine.id}
+            onclick={() => handleTtsSelect(engine.id)}
+          >
+            <span class="provider-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6">
+                {#if engine.id === 'system'}
+                  <path d="M4 10v4h3l4 3.5v-11L7 10z"></path>
+                  <path d="M15.5 9.5a4 4 0 0 1 0 5M18 7a7.5 7.5 0 0 1 0 10"></path>
+                {:else if engine.id === 'piper'}
+                  <rect x="5" y="5" width="14" height="10" rx="1.5"></rect>
+                  <path d="M9 19h6M12 15v4"></path>
+                {:else if engine.id === 'edge'}
+                  <circle cx="12" cy="12" r="8.5"></circle>
+                  <path d="M3.5 12h17"></path>
+                {:else if engine.id === 'openai'}
+                  <circle cx="12" cy="12" r="2.6"></circle>
+                  <ellipse cx="12" cy="12" rx="9.3" ry="4.3" transform="rotate(-28 12 12)"></ellipse>
+                {:else}
+                  <path d="M12 3.5v17M5 7.5l14 9M19 7.5l-14 9"></path>
+                {/if}
+              </svg>
+            </span>
+            <span class="provider-name">{engine.name}</span>
+            <span class="engine-hint">{engine.hint}</span>
+            {#if tts.provider === engine.id}
+              <span class="selected-badge">✓ Active</span>
+            {/if}
+          </button>
+        {/each}
+      </div>
+
+      <div class="config-section">
+        <h3 class="config-title">Configure: {TTS_ENGINES.find((e) => e.id === tts.provider)?.name ?? tts.provider}</h3>
+
+        {#if tts.provider === 'system'}
+          <div class="form-group">
+            <label for="tts-voice">Voice (optional)</label>
+            <input
+              id="tts-voice"
+              type="text"
+              bind:value={tts.voice}
+              placeholder="OS default voice"
+              onchange={() => handleTtsFieldChange('voice')}
+            />
+            <small class="field-hint">macOS `say` voice, Windows voice-name match, or espeak-ng voice (e.g. en). Empty = OS default.</small>
+          </div>
+        {:else if tts.provider === 'piper'}
+          <div class="form-group">
+            <label for="tts-model-path">Voice model (.onnx)</label>
+            <input
+              id="tts-model-path"
+              type="text"
+              bind:value={tts.modelPath}
+              placeholder="/path/to/en_US-lessac-medium.onnx"
+              onchange={() => handleTtsFieldChange('modelPath')}
+            />
+            <small class="field-hint">`PIPER_MODEL` env var wins when set.</small>
+          </div>
+        {:else if tts.provider === 'edge'}
+          <div class="form-group">
+            <label for="tts-edge-voice">Voice (optional)</label>
+            <input
+              id="tts-edge-voice"
+              type="text"
+              bind:value={tts.voice}
+              placeholder="e.g., en-US-AriaNeural"
+              onchange={() => handleTtsFieldChange('voice')}
+            />
+            <small class="field-hint">Needs the `edge-tts` CLI (`pip install edge-tts`). Empty = Edge default.</small>
+          </div>
+        {:else if tts.provider === 'openai'}
+          <div class="form-group">
+            <label for="tts-openai-url">Base URL</label>
+            <input
+              id="tts-openai-url"
+              type="text"
+              bind:value={tts.baseUrl}
+              placeholder="https://api.openai.com/v1"
+              onchange={() => handleTtsFieldChange('baseUrl')}
+            />
+            <small class="field-hint">Any OpenAI-compatible `/audio/speech` endpoint (e.g. Kokoro).</small>
+          </div>
+          <div class="form-group">
+            <label for="tts-openai-model">Model</label>
+            <input
+              id="tts-openai-model"
+              type="text"
+              bind:value={tts.model}
+              placeholder="gpt-4o-mini-tts"
+              onchange={() => handleTtsFieldChange('model')}
+            />
+          </div>
+          <div class="form-group">
+            <label for="tts-openai-voice">Voice</label>
+            <input
+              id="tts-openai-voice"
+              type="text"
+              bind:value={tts.voice}
+              placeholder="alloy"
+              onchange={() => handleTtsFieldChange('voice')}
+            />
+          </div>
+          <div class="form-group">
+            <label for="tts-openai-key">
+              API Key
+              {#if ttsKeySaved}
+                <span class="key-saved">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                    <path d="M5 12.5l4.5 4.5L19 7.5"></path>
+                  </svg>
+                  saved on server
+                </span>
+              {/if}
+            </label>
+            <input
+              id="tts-openai-key"
+              type="password"
+              bind:value={tts.apiKey}
+              placeholder={ttsKeySaved ? '•••••••• (stored on the server)' : 'sk-...'}
+              onchange={handleTtsApiKeyChange}
+            />
+          </div>
+        {:else}
+          <div class="form-group">
+            <label for="tts-eleven-model">Model</label>
+            <input
+              id="tts-eleven-model"
+              type="text"
+              bind:value={tts.model}
+              placeholder="eleven_multilingual_v2"
+              onchange={() => handleTtsFieldChange('model')}
+            />
+          </div>
+          <div class="form-group">
+            <label for="tts-eleven-voice">Voice ID</label>
+            <input
+              id="tts-eleven-voice"
+              type="text"
+              bind:value={tts.voice}
+              placeholder="e.g., pNInz6obpgDQGcFmaJgB (Adam)"
+              onchange={() => handleTtsFieldChange('voice')}
+            />
+          </div>
+          <div class="form-group">
+            <label for="tts-eleven-key">
+              API Key
+              {#if ttsKeySaved}
+                <span class="key-saved">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                    <path d="M5 12.5l4.5 4.5L19 7.5"></path>
+                  </svg>
+                  saved on server
+                </span>
+              {/if}
+            </label>
+            <input
+              id="tts-eleven-key"
+              type="password"
+              bind:value={tts.apiKey}
+              placeholder={ttsKeySaved ? '•••••••• (stored on the server)' : 'sk-...'}
+              onchange={handleTtsApiKeyChange}
+            />
+          </div>
+        {/if}
+
+        <button class="btn-bracket gold save-btn" onclick={toggle}>Save &amp; Close</button>
+      </div>
     </div>
   </div>
 {/if}
@@ -688,8 +1397,8 @@
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    width: min(620px, 92vw);
-    max-height: 84vh;
+    width: min(760px, 94vw);
+    max-height: 86vh;
     display: flex;
     flex-direction: column;
     background: linear-gradient(160deg, rgba(5, 11, 26, 0.92), rgba(5, 11, 26, 0.84));
@@ -811,6 +1520,64 @@
     padding: 14px 18px;
     display: grid;
     gap: 6px;
+  }
+
+  /* Uplink mode switch: two tabs, active one carries the cyan edge. The
+     inactive tab stays legible — mode must survive without colour. */
+  .uplink-switch {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    padding: 14px 18px 0;
+  }
+
+  .uplink-tab {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    padding: 9px 12px;
+    background: transparent;
+    border: 1px solid var(--hud-line);
+    border-radius: 0;
+    cursor: pointer;
+    text-align: left;
+    transition:
+      border-color 0.2s ease,
+      box-shadow 0.2s ease,
+      background 0.2s ease;
+  }
+
+  .uplink-tab:hover {
+    background: rgba(125, 249, 255, 0.05);
+    border-color: var(--hud-line-strong);
+  }
+
+  .uplink-tab.active {
+    background: rgba(125, 249, 255, 0.06);
+    border-color: var(--hud-cyan);
+    box-shadow:
+      0 0 14px rgba(125, 249, 255, 0.25),
+      inset 0 0 22px rgba(125, 249, 255, 0.05);
+  }
+
+  .uplink-tab-key {
+    font-family: var(--font-hud);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 1.8px;
+    color: #e8f6ff;
+  }
+
+  .uplink-tab.active .uplink-tab-key {
+    color: var(--hud-cyan);
+  }
+
+  .uplink-tab-hint {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    color: var(--hud-steel);
   }
 
   .section-label {
@@ -970,6 +1737,23 @@
     line-height: 1.5;
   }
 
+  .field-hint {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.5px;
+    color: var(--hud-steel);
+  }
+
+  .engine-hint {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    color: var(--hud-steel);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   /* ── Connection status: white mark + word, no colour coding ─────────── */
   .health-status {
     display: flex;
@@ -1019,6 +1803,15 @@
   }
 
   .health-time {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.5px;
+    color: var(--hud-steel);
+  }
+
+  /* Server-reported probe detail (HTTP 401, fetch failed, …) — same muted
+  treatment as the timestamp, never a colour. */
+  .health-error {
     font-family: var(--font-mono);
     font-size: 10.5px;
     letter-spacing: 0.5px;

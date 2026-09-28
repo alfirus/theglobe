@@ -10,6 +10,8 @@
 </script>
 
 <script lang="ts">
+	import { pushEvent } from '$lib/events';
+
 	/**
 	 * Right telemetry rail. Every number here is measured, not decorative:
 	 * node/edge/bloom/fps/jitter come from the WebGL globe's own telemetry
@@ -48,13 +50,33 @@
 			}
 			const started = performance.now();
 			try {
+				// Agent uplink ids (`*-agent`) probe the agent namespace; everything
+				// else probes providers. The server answers both shapes.
+				const probeBody = currentProvider.endsWith('-agent')
+					? { agentId: currentProvider }
+					: { providerId: currentProvider };
 				const res = await fetch('/api/health', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ providerId: currentProvider }),
+					body: JSON.stringify(probeBody),
 					cache: 'no-store'
 				});
-				if (!cancelled && res.ok) latencyMs = Math.round(performance.now() - started);
+				if (cancelled) return;
+				if (res.ok) {
+					latencyMs = Math.round(performance.now() - started);
+					try {
+						const data: unknown = await res.json();
+						const healthy =
+							!!data && typeof data === 'object' && (data as { healthy?: unknown }).healthy === true;
+						const err =
+							!!data && typeof data === 'object'
+								? String((data as { error?: unknown }).error ?? '')
+								: '';
+						if (!healthy && err) pushEvent('HEALTH', `${currentProvider}: ${err}`);
+					} catch {
+						/* latency still counts; the detail was unreadable */
+					}
+				}
 			} catch {
 				if (!cancelled) latencyMs = null;
 			}
