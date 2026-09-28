@@ -1,5 +1,6 @@
 <script module lang="ts">
   import DOMPurify from 'dompurify';
+  import { logEvent } from '$lib/log';
 
   /**
    * DOMPurify whitelists `data:` URIs for a few tags (`img`, `audio`, `video`, …)
@@ -29,15 +30,30 @@
 
 <script lang="ts">
   import { marked } from 'marked';
+  import { createEventDispatcher } from 'svelte';
 
   export type Message = {
     /** Client-only identity used to target the right bubble while streaming (see +page.svelte). */
     id?: string;
     role: 'user' | 'assistant';
     text: string;
+    /** When set, this message is a pending placeholder awaiting stream content. */
+    pending?: boolean;
+    /** When set, this message carries an error classification (P1-2). */
+    error?: { title: string; detail: string };
   };
 
   let { message }: { message: Message } = $props();
+  let bubbleRef: HTMLDivElement;
+
+  // Retry dispatches a custom event so the parent can walk back to this message's user prompt
+  const retryDispatch = createEventDispatcher<{ retry: { messageId: string } }>();
+
+  function handleRetry() {
+    if (message.id) {
+      retryDispatch('retry', { messageId: message.id });
+    }
+  }
 
   /**
    * Sanitizer configuration for rendered markdown.
@@ -87,16 +103,34 @@
     try {
       const html = marked.parse(text, { async: false, breaks: true, gfm: true });
       return DOMPurify.sanitize(html, SANITIZE_OPTIONS);
-    } catch {
+    } catch (err) {
       // Returning the raw text here would reopen the injection hole — escape it.
+      logEvent('render', 'markdown_failed', { errName: err instanceof Error ? err.name : String(err) }, 'warn');
       return escapeHtml(text);
     }
   }
 </script>
 
-<div class="message {message.role}">
+<div class="message {message.role} {message.pending ? 'pending' : ''} {message.error ? 'error' : ''}" bind:this={bubbleRef}>
   <span class="role">{message.role === 'user' ? 'You' : 'Glob'}</span>
-  {#if message.role === 'assistant'}
+
+  {#if message.pending}
+    <!-- Skeleton while streaming — no visual gap between send and first token -->
+    <div class="skeleton">
+      <div class="dot"></div>
+      <div class="dot"></div>
+      <div class="dot"></div>
+    </div>
+  {:else if message.error}
+    <!-- Error bubble with title, detail, and retry affordance (P1-2) -->
+    <div class="error-box">
+      <span class="error-title">{message.error.title}</span>
+      {#if message.error.detail}
+        <p class="error-detail">{message.error.detail}</p>
+      {/if}
+      <button class="retry-btn" onclick={handleRetry}>↻ Retry</button>
+    </div>
+  {:else if message.role === 'assistant'}
     <div class="text markdown-content">{@html renderMarkdown(message.text)}</div>
   {:else}
     <!-- Svelte escapes interpolated text, so this renders inert by construction. -->
@@ -225,5 +259,68 @@
   @keyframes fadeIn {
     from { opacity: 0; transform: translateY(3px); }
     to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Pending skeleton (P1-2) */
+  .skeleton {
+    display: flex;
+    gap: 4px;
+    padding: 8px 0;
+  }
+
+  .skeleton .dot {
+    width: 6px;
+    height: 6px;
+    background: rgba(68, 136, 255, 0.4);
+    border-radius: 50%;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+
+  .skeleton .dot:nth-child(2) { animation-delay: 0.2s; }
+  .skeleton .dot:nth-child(3) { animation-delay: 0.4s; }
+
+  /* Error bubble (P1-2) */
+  .error-box {
+    padding: 8px 12px;
+    background: rgba(255, 107, 107, 0.08);
+    border: 1px solid rgba(255, 107, 107, 0.3);
+    border-radius: 8px;
+    margin-top: 4px;
+  }
+
+  .error-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #ff6b6b;
+    display: block;
+  }
+
+  .error-detail {
+    font-size: 12px;
+    color: #c0d4ff;
+    margin: 4px 0 8px 0;
+    line-height: 1.5;
+  }
+
+  .retry-btn {
+    padding: 4px 12px;
+    background: rgba(255, 107, 107, 0.15);
+    border: 1px solid rgba(255, 107, 107, 0.5);
+    border-radius: 6px;
+    color: #ff6b6b;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .retry-btn:hover {
+    background: rgba(255, 107, 107, 0.3);
+    box-shadow: 0 0 12px rgba(255, 107, 107, 0.3);
+  }
+
+  @keyframes pulse {
+    0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+    40% { opacity: 1; transform: scale(1.2); }
   }
 </style>

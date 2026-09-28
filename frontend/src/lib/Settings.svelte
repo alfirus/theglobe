@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { logEvent } from '$lib/log';
 
   export type Provider = 
     | 'hermes'
@@ -30,6 +31,9 @@
   // Provider health state. Must be $state: mutating a plain object in runes
   // mode never re-renders, so the badge/timestamp never moved (M11).
   let providerHealth = $state<Record<string, { status: 'unknown' | 'healthy' | 'unhealthy'; lastChecked?: number }>>({});
+
+  // Provider health reason (P1-2: surfaced from /api/health).
+  let providerHealthReason = $state<string | null>(null);
 
   interface StoredSettings {
     provider?: Provider;
@@ -178,11 +182,38 @@
     const config = providers[providerId];
     if (!config.baseUrl) {
       providerHealth[providerId] = { status: 'unhealthy', lastChecked: Date.now() };
+      providerHealthReason = `No base URL configured for ${providers[providerId]?.name ?? providerId}`;
       return;
     }
 
     try {
-      // Try common health endpoints
+      // Probe the server-side health endpoint first (P1-2: structured reasons).
+      const res = await fetch('/api/health', {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(5000)
+      });
+
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        // /api/health returns { status, providers: { <id>: { healthy, reason? } } }.
+        const providerInfo = data?.providers?.[providerId];
+        if (typeof providerInfo === 'object' && providerInfo !== null) {
+          if ((providerInfo as any).healthy) {
+            providerHealth[providerId] = { status: 'healthy', lastChecked: Date.now() };
+            providerHealthReason = null;
+            return;
+          }
+          // Unhealthy — surface the server's reason.
+          const reason = (providerInfo as any).reason ?? 'Provider reported unhealthy';
+          providerHealth[providerId] = { status: 'unhealthy', lastChecked: Date.now() };
+          providerHealthReason = typeof reason === 'string' ? reason : String(reason);
+          logEvent('health', 'provider_unhealthy', { provider: providerId, reason }, 'warn');
+          return;
+        }
+      }
+
+      // Fallback: try common health endpoints.
       const urls = [
         `${config.baseUrl}/health`,
         `${config.baseUrl}/v1/models`
@@ -207,8 +238,17 @@
         status: healthy ? 'healthy' : 'unhealthy', 
         lastChecked: Date.now() 
       };
-    } catch {
+      if (!healthy) {
+        providerHealthReason = `Could not reach ${config.baseUrl}`;
+        logEvent('health', 'probe_failed', { provider: providerId, baseUrl: config.baseUrl }, 'warn');
+      } else {
+        providerHealthReason = null;
+      }
+    } catch (err) {
       providerHealth[providerId] = { status: 'unhealthy', lastChecked: Date.now() };
+      const reason = err instanceof Error ? err.message : String(err);
+      providerHealthReason = `Health probe error: ${reason}`;
+      logEvent('health', 'probe_error', { provider: providerId, error: reason }, 'error');
     }
   }
 
@@ -384,6 +424,14 @@
             Check Connection
           </button>
         </div>
+
+        <!-- Health reason (P1-2) -->
+        {#if providerHealthReason && selectedProvider}
+          <div class="health-reason">
+            <span class="reason-icon">{providerHealth[selectedProvider]?.status === 'healthy' ? 'ℹ️' : '⚠️'}</span>
+            <p>{providerHealthReason}</p>
+          </div>
+        {/if}
 
         <div class="form-group">
           <label>Base URL</label>
@@ -695,6 +743,30 @@
   .check-health-btn:hover {
     background: rgba(68, 136, 255, 0.2);
     border-color: #4488ff;
+  }
+
+  /* Health reason (P1-2) */
+  .health-reason {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px;
+    margin-bottom: 16px;
+    background: rgba(255, 170, 0, 0.06);
+    border: 1px solid rgba(255, 170, 0, 0.25);
+    border-radius: 8px;
+  }
+
+  .health-reason .reason-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .health-reason p {
+    margin: 0;
+    font-size: 12px;
+    color: #c0d4ff;
+    line-height: 1.5;
   }
 
   .save-btn {

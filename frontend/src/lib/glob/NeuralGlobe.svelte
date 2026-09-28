@@ -20,7 +20,7 @@
   import { createAmbientParticles, updateAmbient, type AmbientSystem } from './ambient';
   import { createElectricArcSystem, updateElectricArcs, type ElectricArcSystem } from './electricArcs';
 
-  let { isSpeaking = false, isThinking = false }: { isSpeaking?: boolean; isThinking?: boolean } = $props();
+  let { isSpeaking = false, isThinking = false, isListening = $bindable(false), isError = false }: { isSpeaking?: boolean; isThinking?: boolean; isListening?: boolean; isError?: boolean } = $props();
 
   let container: HTMLDivElement;
   let animationId: number;
@@ -257,11 +257,25 @@
     const targetColor = isSpeaking ? SPEAKING_COLOR : COLORS.node;
     nodeMaterial.uniforms.uColor.value.lerp(targetColor, 0.05);
 
+    // Listening state: gentle cyan pulse (user is speaking)
+    if (isListening && !isSpeaking) {
+      const listenPulse = Math.sin(elapsed * 3) * 0.05 + 0.1;
+      bloomPass.strength = listenPulse;
+      nodeMaterial.uniforms.uColor.value.lerp(new THREE.Color(0x44ddaa), 0.02);
+    }
+
+    // Error state: red tint, slower rotation, higher bloom
+    if (isError) {
+      const errPulse = Math.sin(elapsed * 6) * 0.15 + 0.3;
+      bloomPass.strength = errPulse;
+      nodeMaterial.uniforms.uColor.value.lerp(new THREE.Color(0xff4444), 0.03);
+    }
+
     // Thinking/streaming state: increase bloom intensity for pulse effect
     if (isThinking && !isSpeaking) {
       const pulse = Math.sin(elapsed * 4) * 0.1 + 0.2;
       bloomPass.strength = pulse;
-    } else {
+    } else if (!isListening && !isError) {
       bloomPass.strength = 0.15; // Default subtle bloom
     }
 
@@ -269,7 +283,7 @@
     const boost = nodeMaterial.uniforms.uActivityBoost;
     if (isThinking || isSpeaking) {
       boost.value = Math.min(boost.value + deltaTime * 2, 1.0);
-    } else {
+    } else if (!isListening && !isError) {
       boost.value = Math.max(boost.value - deltaTime * 3, 0.0);
     }
 
@@ -284,11 +298,12 @@
     updateAmbient(ambientSystem, deltaTime);
 
     // Update electric arcs
-    const isActive = isSpeaking || isThinking;
+    const isActive = isSpeaking || isThinking || isListening;
     updateElectricArcs(electricArcSystem, nodeSystem.nodes, deltaTime, isActive);
 
-    // Slow rotation of entire globe
-    globeGroup.rotation.y += 0.1 * deltaTime;
+    // Slow rotation of entire globe (slower during error)
+    const rotSpeed = isError ? 0.05 : 0.1;
+    globeGroup.rotation.y += rotSpeed * deltaTime;
 
     // Render with post-processing
     composer.render();

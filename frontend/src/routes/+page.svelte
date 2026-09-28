@@ -9,6 +9,9 @@
   import ConversationSidebar from '$lib/ConversationSidebar.svelte';
   import type { Message } from '$lib/ChatBubble.svelte';
   import * as db from '$lib/db';
+  import { classifyHttpFailure, classifyThrownError } from '$lib/chatError';
+  import { logEvent, errorFields } from '$lib/log';
+  import ProviderHealth from '$lib/ProviderHealth.svelte';
 
   /**
    * In-memory conversation. Carries `createdAt`/`updatedAt` alongside the
@@ -35,6 +38,8 @@
   let showInput = $state(false);
   let isThinking = $state(false);
   let isSpeaking = $state(false);
+  let isListening = $state(false);
+  let isError = $state(false);
   let currentAudio: HTMLAudioElement | null = null;
   let currentAudioUrl: string | null = null;
   let selectedProvider = $state<Provider>(DEFAULT_PROVIDER);
@@ -428,17 +433,43 @@
 
       await saveCurrentConversation();
     } catch (err) {
-      console.error('Chat error:', err);
-
       const aborted = err instanceof DOMException && err.name === 'AbortError';
+      // Classify the error using the structured chatError helpers (P1-2).
+      let classification: ReturnType<typeof classifyThrownError> | null;
+      if (aborted || timedOut || assistantText.length > 0) {
+        classification = classifyThrownError(err, {
+          provider: selectedProvider,
+          timedOut,
+          stopRequested,
+          received: assistantText.length
+        });
+      } else {
+        // Non-abort error before any bytes arrived — treat as thrown.
+        classification = classifyThrownError(err, {
+          provider: selectedProvider,
+          timedOut: false,
+          stopRequested: false,
+          received: 0
+        });
+      }
+
+      logEvent('chat', 'error', { kind: classification?.kind ?? 'unknown', ...errorFields(err) }, 'error');
+
       let note: string;
       if (aborted && stopRequested) note = assistantText ? '' : '⏹ Generation stopped.';
       else if (aborted && timedOut) note = `⚠️ ${selectedProvider} timed out. Try again.`;
       else if (aborted) note = '⏹ Generation stopped.';
-      else note = `⚠️ Cannot connect to ${selectedProvider}. Check settings.`;
+      else if (classification) {
+        note = `${classification.title}: ${classification.detail}`;
+      } else {
+        note = `⚠️ Cannot connect to ${selectedProvider}. Check settings.`;
+      }
 
       const bubbleText =
         assistantText + (assistantText && note ? `\n\n${note}` : note);
+
+      // Set globe error state for critical errors.
+      isError = classification?.kind === 'provider' || classification?.kind === 'auth';
 
       // Never remove anything: replace the placeholder when it exists, append when
       // the failure happened before it was created. The user's message survives
@@ -502,8 +533,11 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div class="globe-wrapper" onclick={handleGlobeClick}>
-    <NeuralGlobe {isSpeaking} {isThinking} />
+    <NeuralGlobe {isSpeaking} {isThinking} bind:isListening={isListening} {isError} />
   </div>
+
+  <!-- Provider health chip (P1-2) -->
+  <ProviderHealth provider={selectedProvider} />
 
   <!-- Chat history: single card on the LEFT side -->
   {#if activeConversationId && conversations.length > 0}
@@ -532,6 +566,7 @@
   {#if activeConversationId && showInput}
     <ChatInput 
       bind:visible={showInput} 
+      bind:isListening={isListening}
       on:send={handleSend}
     />
   {/if}
