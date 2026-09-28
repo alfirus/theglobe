@@ -6,6 +6,9 @@
   import type { Provider } from '$lib/Settings.svelte';
   import type { Agent, UplinkMode } from '$lib/Settings.svelte';
   import * as db from '$lib/db';
+  import { classifyHttpFailure, classifyThrownError } from '$lib/chatError';
+  import { logEvent, errorFields } from '$lib/log';
+  import ProviderHealth from '$lib/ProviderHealth.svelte';
   import { loadEffectiveSettings, readLocalSettings } from '$lib/settingsSync';
 
   // Visor HUD (Direction B)
@@ -86,6 +89,8 @@
   let isThinking = $state(false);
   let isStreaming = $state(false); // a reply is arriving chunk by chunk
   let isSpeaking = $state(false); // TTS playback
+  let isListening = $state(false);
+  let isError = $state(false);
   let currentAudio: HTMLAudioElement | null = null;
   let currentAudioUrl: string | null = null;
   let selectedProvider = $state<Provider>(DEFAULT_PROVIDER);
@@ -636,15 +641,40 @@
       await saveCurrentConversation();
       pushEvent('CHAT', `saved · ${thoughtTokens} frames`);
     } catch (err) {
-      console.error('Chat error:', err);
-
       const aborted = err instanceof DOMException && err.name === 'AbortError';
-      // No emoji in product copy — these land verbatim in the transcript.
+      // Classify the error using the structured chatError helpers (P1-2).
+      let classification: ReturnType<typeof classifyThrownError> | null;
+      if (aborted || timedOut || assistantText.length > 0) {
+        classification = classifyThrownError(err, {
+          provider: selectedProvider,
+          timedOut,
+          stopRequested,
+          received: assistantText.length
+        });
+      } else {
+        // Non-abort error before any bytes arrived — treat as thrown.
+        classification = classifyThrownError(err, {
+          provider: selectedProvider,
+          timedOut: false,
+          stopRequested: false,
+          received: 0
+        });
+      }
+
+      logEvent('chat', 'error', { kind: classification?.kind ?? 'unknown', ...errorFields(err) }, 'error');
+
       let note: string;
       if (aborted && stopRequested) note = assistantText ? '' : 'Generation stopped.';
       else if (aborted && timedOut) note = `Timed out: ${activeUplinkId}. Try again.`;
       else if (aborted) note = 'Generation stopped.';
-      else note = `Cannot connect to ${activeUplinkId}. Check settings.`;
+      else if (classification) {
+        note = `${classification.title}: ${classification.detail}`;
+      } else {
+        note = `Cannot connect to ${activeUplinkId}. Check settings.`;
+      }
+
+      // Set globe error state for critical errors.
+      isError = classification?.kind === 'provider' || classification?.kind === 'auth';
 
       pushEvent('ERROR', aborted ? 'request aborted' : note);
       for (const s of thoughtSteps) {
@@ -654,6 +684,9 @@
 
       const bubbleText =
         assistantText + (assistantText && note ? `\n\n${note}` : note);
+
+      // Set globe error state for critical errors.
+      isError = classification?.kind === 'provider' || classification?.kind === 'auth';
 
       // Never remove anything: replace the placeholder when it exists, append when
       // the failure happened before it was created. The user's message survives
