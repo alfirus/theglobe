@@ -686,12 +686,13 @@
     }
   }
 
-  function handleProviderChange(e: CustomEvent<Provider | UplinkSelection>) {
-    // The dispatcher delivers the CustomEvent, not the id (H4). Reading the event
-    // object itself made `selectedProvider` an event and `X-Provider` garbage.
+  function handleProviderChange(selection: Provider | UplinkSelection) {
+    // Runes callback prop (was `on:change` + CustomEvent): Settings delivers
+    // the selection value directly, not an event object. Reading the event
+    // itself once made `selectedProvider` an event and `X-Provider` garbage.
     // New shape carries the whole uplink (mode + both selections); the legacy
     // bare-Provider shape still arrives from older Settings builds.
-    const detail = e.detail;
+    const detail = selection;
     if (detail && typeof detail === 'object') {
       uplinkMode = normalizeUplinkMode(detail.mode);
       selectedProvider = normalizeProvider(detail.provider);
@@ -814,7 +815,7 @@
     hideTrigger
     bind:open={settingsOpen}
     initialProvider={selectedProvider}
-    on:change={handleProviderChange}
+    onchange={handleProviderChange}
   />
 
   <!-- Voice-output toggle: bottom right HUD bracket control — sharp corners,

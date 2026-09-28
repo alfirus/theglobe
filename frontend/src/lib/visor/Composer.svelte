@@ -202,7 +202,7 @@
 			disabled={disabled}
 		/>
 
-		<button class="send" onclick={submit} disabled={disabled || !input.trim()} title="Send">
+		<button class="send" onclick={submit} disabled={disabled || !input.trim()} title="Send" aria-label="Send message">
 			<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6">
 				<path d="M12 19V5M6 11l6-6 6 6"></path>
 			</svg>

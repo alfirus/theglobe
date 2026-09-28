@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
   import { loadEffectiveSettings } from '$lib/settingsSync';
   import { pushEvent } from '$lib/events';
 
@@ -52,11 +51,13 @@
     agent: Agent;
   }
 
-  const dispatch = createEventDispatcher<{ change: Provider | UplinkSelection }>();
-
-  /** Tell the host page which uplink carries chat (mode + both selections). */
+  /**
+   * Runes callback prop (replaces `createEventDispatcher` + `on:change`): the
+   * host passes `onchange={...}` and receives the whole uplink selection.
+   * The legacy bare-`Provider` shape is still accepted for older hosts.
+   */
   function notifyUplink(): void {
-    dispatch('change', { mode: uplinkMode, provider: selectedProvider, agent: selectedAgent });
+    onchange?.({ mode: uplinkMode, provider: selectedProvider, agent: selectedAgent });
   }
 
   let {
@@ -64,9 +65,24 @@
     // Visor HUD renders its own Settings entry in the top bar, so the legacy
     // floating button can be hidden while the modal stays driven from outside.
     hideTrigger = false,
-    open = $bindable(false)
-  }: { initialProvider?: Provider; hideTrigger?: boolean; open?: boolean } = $props();
-  let selectedProvider = $state<Provider>(initialProvider as Provider);
+    open = $bindable(false),
+    onchange
+  }: {
+    initialProvider?: Provider;
+    hideTrigger?: boolean;
+    open?: boolean;
+    onchange?: (selection: Provider | UplinkSelection) => void;
+  } = $props();
+  let selectedProvider = $state<Provider>('hermes');
+
+  // Adopt the host's provider (server hydration lands after mount on a fresh
+  // profile) until the user picks one in this modal — afterwards the local
+  // choice wins. A `$effect.pre` (not a `$state` initializer) keeps
+  // `initialProvider` reactive, which also clears `state_referenced_locally`.
+  $effect.pre(() => {
+    const incoming = initialProvider ?? 'hermes';
+    if (!edited.provider) selectedProvider = incoming;
+  });
 
   // System prompt state
   let systemPrompt = $state('');
