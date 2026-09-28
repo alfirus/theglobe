@@ -19,6 +19,7 @@
   import { createSparkSystem, updateSparks, type SparkSystem } from './sparks';
   import { createAmbientParticles, updateAmbient, type AmbientSystem } from './ambient';
   import { createElectricArcSystem, updateElectricArcs, type ElectricArcSystem } from './electricArcs';
+  import { createAudioReactive, type AudioBands } from './audioReactive';
 
   let { isSpeaking = false, isThinking = false }: { isSpeaking?: boolean; isThinking?: boolean } = $props();
 
@@ -62,6 +63,23 @@
   // Hoisted targets so animate() allocates nothing per frame
   const SPEAKING_COLOR = new THREE.Color(0xddaa44); // Warm amber while speaking
   const ARC_COLOR = new THREE.Color(0x88ccff);
+
+  // Audio-reactive pipeline (created in init, used in frameStep)
+  let audioReactive: ReturnType<typeof createAudioReactive> | null = null;
+
+  // React to isSpeaking prop: start/stop the WebAudio graph
+  $effect(() => {
+    const _ = isSpeaking; // track dependency
+    if (!audioReactive) return;
+    if (isSpeaking && currentMediaElement) {
+      audioReactive.start(currentMediaElement);
+    } else if (!isSpeaking) {
+      audioReactive.stop();
+    }
+  });
+
+  // Reference to the <audio> element so NeuralGlobe can connect it to WebAudio
+  let currentMediaElement: HTMLMediaElement | null = null;
 
   onMount(() => {
     init();
@@ -192,6 +210,9 @@
     // Clock
     clock = new THREE.Clock();
 
+    // Audio-reactive pipeline (created once, started/stopped via isSpeaking prop)
+    audioReactive = createAudioReactive();
+
     // Listeners
     window.addEventListener('resize', onResize);
     document.addEventListener('visibilitychange', onVisibilityChange);
@@ -275,6 +296,29 @@
 
     // Update connection shader
     connectionSystem.material.uniforms.uTime.value = elapsed;
+
+    // === AUDIO-REACTIVE UNIFORMS (P1-3) ===
+    if (audioReactive) {
+      const bands = audioReactive.sample(deltaTime);
+
+      // Node material: bass drives point size (already in shader via uAudioBass)
+      nodeMaterial.uniforms.uAudioBass.value = bands.bass;
+
+      // Connection material: mid-band boosts brightness
+      connectionSystem.material.uniforms.uAudioMid.value = bands.mid;
+
+      // Ambient particles: opacity scales with high band (blueprint "particles = high → count")
+      ambientSystem.material.opacity = 0.12 + bands.high * 0.35;
+
+      // Bloom strength: base + mid-level contribution (blueprint: glow = mid * 2)
+      const audioLevel = (bands.bass + bands.mid + bands.high) / 3;
+      if (!isThinking || isSpeaking) {
+        bloomPass.strength = 0.15 + audioLevel * 0.4;
+      }
+
+      // Globe scale: bass drives bigger motion than sibilance (blueprint: scale = 1.0 + amplitude * 0.15)
+      globeGroup.scale.setScalar(1 + bands.bass * 0.15);
+    }
 
     // Update sparks from signals
     updateSparks(sparkSystem, simulation.signals, nodeSystem.positions, deltaTime);

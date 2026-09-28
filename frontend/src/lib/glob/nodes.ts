@@ -193,6 +193,7 @@ export const nodeVertexShader = `
 uniform float uTime;
 uniform float uBrightness;
 uniform float uActivityBoost;
+uniform float uAudioBass;
 
 attribute float aPhase;
 attribute float aBrightness;
@@ -215,7 +216,8 @@ void main() {
   
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
   
-  float sizeBase = 1.8 + aActivity * 2.0;
+  // Bass drives point size — bigger motion for low frequencies
+  float sizeBase = 1.8 + aActivity * 2.0 + uAudioBass * 1.5;
   gl_PointSize = (sizeBase) * (280.0 / -mvPosition.z);
   gl_Position = projectionMatrix * mvPosition;
 }
@@ -264,7 +266,8 @@ export function createNodeMaterial(color: THREE.Color): THREE.ShaderMaterial {
       uTime: { value: 0 },
       uBrightness: { value: 0.9 },
       uColor: { value: color },
-      uActivityBoost: { value: 0 }
+      uActivityBoost: { value: 0 },
+      uAudioBass: { value: 0 }
     },
     transparent: true,
     blending: THREE.AdditiveBlending,

@@ -32,6 +32,7 @@ export function createAmbientParticles(color: THREE.Color): AmbientSystem {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 
+  // Base opacity — high band audio will modulate this in frameStep()
   const material = new THREE.PointsMaterial({
     color: color,
     size: 0.01,
