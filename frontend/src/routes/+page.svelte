@@ -35,7 +35,11 @@
   let showInput = $state(false);
   let isThinking = $state(false);
   let isSpeaking = $state(false);
-  let currentAudio: HTMLAudioElement | null = null;
+  // $state.raw, not a plain let: NeuralGlobe reads this through the
+  // `audioElement` prop, and a plain let compiles to a derived that caches its
+  // first read — the prop would stay undefined and start() would never fire
+  // (Mirza finding 1).
+  let currentAudio = $state.raw<HTMLAudioElement | null>(null);
   let currentAudioUrl: string | null = null;
   let selectedProvider = $state<Provider>(DEFAULT_PROVIDER);
   let systemPrompt = $state('');
