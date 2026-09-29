@@ -65,9 +65,7 @@ export const POST: RequestHandler = async ({ request }) => {
 
 		const parts: { audio: Buffer; contentType: string }[] = [];
 		for (let i = 0; i < chunks.length; i++) {
-			parts.push(
-				await synthesizeChunk({ text: chunks[i], settings, timeoutMs: chunkTimeout(i) })
-			);
+			parts.push(await synthesizeChunk({ text: chunks[i], settings, timeoutMs: chunkTimeout(i) }));
 		}
 
 		// Single chunk: return it untouched. Multiple WAV chunks: one header +

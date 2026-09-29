@@ -1,10 +1,10 @@
 name: CI
 
-# P1-5 test + CI baseline (card t_644b7899).
-# Quality gate for every PR into main: install → type-check → unit tests →
-# Playwright smoke → build. The gate definitions live here; branch protection
-# (required status checks) is enforced separately by Shiela — the check name to
-# require is `check · unit · smoke · build`.
+# P1-5 test + CI baseline (card t_644b7899) + P1-6 lint/format gates (t_58636067).
+# Quality gate for every PR into main: install → type-check → lint/format →
+# unit tests → Playwright smoke → build. The gate definitions live here; branch
+# protection (required status checks) is enforced separately by Shiela — the
+# check name to require is `check · lint · unit · smoke · build`.
 
 on:
   pull_request:
@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   quality:
-    name: check · unit · smoke · build
+    name: check · lint · unit · smoke · build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -43,6 +43,9 @@ jobs:
 
       - name: Type-check (svelte-check)
         run: npm run check
+
+      - name: Lint + format check (ESLint · Prettier)
+        run: npm run lint
 
       - name: Unit tests (Vitest)
         run: npm run test

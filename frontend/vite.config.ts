@@ -5,8 +5,7 @@ import { defineConfig } from 'vite';
 // svelte.config.js to be ignored entirely — so call it bare and keep all
 // SvelteKit config (adapter-node, compilerOptions) in svelte.config.js.
 export default defineConfig({
-	plugins: [sveltekit()
-	],
+	plugins: [sveltekit()],
 
 	// P0-4: bind dev and preview to loopback only — /api/* must never be
 	// reachable from the LAN. The shared-secret/Origin guard in $lib/config is

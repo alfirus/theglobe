@@ -50,7 +50,14 @@
 			<span class="title">CONVERSATIONS</span>
 			<span class="count">{conversations.length}</span>
 			<button class="close" onclick={onclose} title="Close (⌘1)" aria-label="Close conversations">
-				<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6">
+				<svg
+					viewBox="0 0 24 24"
+					width="12"
+					height="12"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.6"
+				>
 					<path d="M6 6l12 12M18 6L6 18"></path>
 				</svg>
 			</button>
@@ -58,7 +65,14 @@
 
 		<button class="new" onclick={onnew}>
 			<span class="new-mark" aria-hidden="true">
-				<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6">
+				<svg
+					viewBox="0 0 24 24"
+					width="13"
+					height="13"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.6"
+				>
 					<path d="M12 5v14M5 12h14"></path>
 				</svg>
 			</span>
@@ -71,11 +85,7 @@
 			{/if}
 			{#each conversations as conv (conv.id)}
 				<li>
-					<button
-						class="row"
-						class:active={conv.id === activeId}
-						onclick={() => onselect(conv.id)}
-					>
+					<button class="row" class:active={conv.id === activeId} onclick={() => onselect(conv.id)}>
 						<span class="row-main">
 							<span class="row-title">{conv.title}</span>
 							<span class="row-meta">
@@ -89,7 +99,14 @@
 						onclick={() => ondelete(conv.id)}
 						aria-label="Delete {conv.title}"
 					>
-						<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6">
+						<svg
+							viewBox="0 0 24 24"
+							width="11"
+							height="11"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.6"
+						>
 							<path d="M6 6l12 12M18 6L6 18"></path>
 						</svg>
 					</button>

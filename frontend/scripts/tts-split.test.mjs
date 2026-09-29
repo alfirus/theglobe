@@ -44,7 +44,10 @@ function feed(text) {
 }
 
 console.log('1. plain sentences, whole text');
-check('two sentences', feed('Hello there. How are you today?'), ['Hello there.', 'How are you today?']);
+check('two sentences', feed('Hello there. How are you today?'), [
+	'Hello there.',
+	'How are you today?'
+]);
 
 console.log('2. character-by-character drip (no mid-word cuts)');
 check('drip', drip('First sentence here. Second one follows.'), [
@@ -76,13 +79,19 @@ check(
 	feed('Plan:\n1. First step.\n2. Second step.\n\nDone for now.'),
 	['Plan:', 'First step.', 'Second step.', 'Done for now.']
 );
-check('heading and bold stripped', feed('## Results\n**Bold** text wins.'), ['Results', 'Bold text wins.']);
+check('heading and bold stripped', feed('## Results\n**Bold** text wins.'), [
+	'Results',
+	'Bold text wins.'
+]);
 check(
 	'links keep their label, bare URLs vanish',
 	feed('See [the docs](https://example.com/x) or https://foo.bar/baz today.'),
 	['See the docs or today.']
 );
-check('code fence dropped', feed('Run it:\n```ts\nconst x = 1;\n```\nThen stop.'), ['Run it:', 'Then stop.']);
+check('code fence dropped', feed('Run it:\n```ts\nconst x = 1;\n```\nThen stop.'), [
+	'Run it:',
+	'Then stop.'
+]);
 check('table rows dropped', feed('A note.\n| a | b |\n|---|---|\nAfter.'), ['A note.', 'After.']);
 
 console.log('6. pressure cut on a run-on (no mid-word split)');
@@ -96,7 +105,11 @@ console.log('6. pressure cut on a run-on (no mid-word split)');
 	const out = feed(long);
 	check('multiple chunks', out.length > 1, true);
 	check('first chunk under cap', out[0].length <= MAX_UTTERANCE, true);
-	check('no word broken', out.every((chunk) => long.includes(chunk)), true);
+	check(
+		'no word broken',
+		out.every((chunk) => long.includes(chunk)),
+		true
+	);
 	check('rejoins', out.join(' '), long);
 }
 
@@ -108,7 +121,9 @@ check('empty', feed('   '), []);
 console.log('8. stall nudge cuts at a clause boundary');
 {
 	const s = createSplitter();
-	const got = s.push('Well, that depends on the budget we have available right now, the timeline and the team');
+	const got = s.push(
+		'Well, that depends on the budget we have available right now, the timeline and the team'
+	);
 	check('nothing complete yet', got, []);
 	const nudged = s.nudge();
 	check(

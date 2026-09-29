@@ -1,13 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import { POST as postTts } from '../../src/routes/api/tts/+server';
-import {
-	call,
-	clearSettingsFile,
-	postJson,
-	stubFetch,
-	writeSettingsFile
-} from '../helpers';
+import { call, clearSettingsFile, postJson, stubFetch, writeSettingsFile } from '../helpers';
 
 /** The C1 RCE payload class: shell metacharacters in user text. */
 const PAYLOAD = '$(calc); rm -rf ~ # `whoami` && echo "pwned"';
@@ -239,7 +233,9 @@ describe('POST /api/tts — engine configuration gates', () => {
 	});
 
 	it('refuses a non-allow-listed cloud endpoint without fetching it', async () => {
-		writeSettingsFile({ tts: { provider: 'openai', baseUrl: 'https://evil.example.com', apiKey: 'x' } });
+		writeSettingsFile({
+			tts: { provider: 'openai', baseUrl: 'https://evil.example.com', apiKey: 'x' }
+		});
 		const fetchStub = stubFetch();
 
 		const res = await call(postTts, ttsRequest({ text: 'hello' }));

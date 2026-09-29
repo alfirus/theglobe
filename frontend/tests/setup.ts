@@ -18,7 +18,8 @@ import path from 'node:path';
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'glob-tests-'));
 process.chdir(sandbox);
 
-const SECRET_ENV = /^(HERMES_API_KEY|GLOB_ALLOWED_ORIGINS|API_SERVER_KEY|VOICE_TOOLS_OPENAI_KEY|OPENAI_API_KEY|ELEVENLABS_API_KEY|PIPER_MODEL|TTS_TIMEOUT_MS)/;
+const SECRET_ENV =
+	/^(HERMES_API_KEY|GLOB_ALLOWED_ORIGINS|API_SERVER_KEY|VOICE_TOOLS_OPENAI_KEY|OPENAI_API_KEY|ELEVENLABS_API_KEY|PIPER_MODEL|TTS_TIMEOUT_MS)/;
 for (const name of Object.keys(process.env)) {
 	if (SECRET_ENV.test(name)) delete process.env[name];
 }

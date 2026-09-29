@@ -74,12 +74,14 @@ export function clearSettingsFile(): void {
 // ── upstream stubs ───────────────────────────────────────────────────────
 
 /** A provider config that is allow-listed (loopback) and carries a fake key. */
-export function providerSettings(overrides: {
-	baseUrl?: string;
-	model?: string;
-	apiKey?: string;
-	provider?: string;
-} = {}): Record<string, unknown> {
+export function providerSettings(
+	overrides: {
+		baseUrl?: string;
+		model?: string;
+		apiKey?: string;
+		provider?: string;
+	} = {}
+): Record<string, unknown> {
 	return {
 		provider: overrides.provider ?? 'lmstudio',
 		configs: {

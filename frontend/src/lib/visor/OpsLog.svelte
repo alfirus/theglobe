@@ -47,7 +47,11 @@
 </script>
 
 <aside class="opslog" aria-label="Globe log">
-	<button class="head" onclick={() => (pinned = true)} title={pinned ? 'Following live' : 'Resume live follow'}>
+	<button
+		class="head"
+		onclick={() => (pinned = true)}
+		title={pinned ? 'Following live' : 'Resume live follow'}
+	>
 		<span class="live"><span class="pulse" class:paused={!pinned}></span>GLOB LOG</span>
 		<span class="count">{events.length}</span>
 	</button>

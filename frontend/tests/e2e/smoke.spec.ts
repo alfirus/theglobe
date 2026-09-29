@@ -33,9 +33,7 @@ let stub: http.Server;
 let previousSettings: string | null = null;
 
 test.beforeAll(async () => {
-	previousSettings = fs.existsSync(SETTINGS_FILE)
-		? fs.readFileSync(SETTINGS_FILE, 'utf8')
-		: null;
+	previousSettings = fs.existsSync(SETTINGS_FILE) ? fs.readFileSync(SETTINGS_FILE, 'utf8') : null;
 
 	stub = http.createServer((req, res) => {
 		const chunks: Buffer[] = [];
@@ -53,7 +51,9 @@ test.beforeAll(async () => {
 					'Cache-Control': 'no-cache'
 				});
 				const frames = [
-					...REPLY_FRAMES.map((content) => `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`),
+					...REPLY_FRAMES.map(
+						(content) => `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`
+					),
 					'data: [DONE]\n\n'
 				];
 				let index = 0;
@@ -121,7 +121,7 @@ test('@smoke app loads, globe canvas renders, message streams back', async ({ pa
 	// A rendered frame is far bigger than an empty buffer; a canvas that never
 	// drew (the old `bloomPass` ReferenceError killed every frame) stays tiny.
 	const frame = await canvas.screenshot();
-	// eslint-disable-next-line no-console -- calibration signal when the smoke fails
+	// Calibration signal when the smoke fails (no-console is off repo-wide).
 	console.log(`[smoke] canvas frame bytes = ${frame.byteLength}`);
 	// A drawn frame measured ~800 KB; a canvas that never drew (the old
 	// `bloomPass` ReferenceError killed every frame) compresses to a few KB.

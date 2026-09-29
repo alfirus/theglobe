@@ -1,6 +1,14 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+	closeSync,
+	existsSync,
+	openSync,
+	readFileSync,
+	statSync,
+	unlinkSync,
+	writeFileSync
+} from 'node:fs';
 import { tmpdir, platform, homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -186,7 +194,11 @@ function splitWav(buffer: Buffer): { header: Buffer; pcm: Buffer; headerLen: num
 		const id = buffer.toString('ascii', offset, offset + 4);
 		const size = buffer.readUInt32LE(offset + 4);
 		if (id === 'data') {
-			return { header: buffer.subarray(0, offset + 8), pcm: buffer.subarray(offset + 8, offset + 8 + size), headerLen: offset + 8 };
+			return {
+				header: buffer.subarray(0, offset + 8),
+				pcm: buffer.subarray(offset + 8, offset + 8 + size),
+				headerLen: offset + 8
+			};
 		}
 		offset += 8 + size + (size % 2);
 	}
@@ -254,7 +266,7 @@ function checkAudioFile(path: string, engine: string): void {
 		}
 	} catch (err) {
 		if (err instanceof Error && err.message.startsWith(engine)) throw err;
-		throw new Error(`${engine} produced no audio output`);
+		throw new Error(`${engine} produced no audio output`, { cause: err });
 	}
 }
 
@@ -315,11 +327,11 @@ function systemTts(voice: string): SystemTts | { error: string } {
 					[
 						'$b64 = [Console]::In.ReadToEnd()',
 						'$text = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($b64))',
-						"Add-Type -AssemblyName System.Speech",
+						'Add-Type -AssemblyName System.Speech',
 						'$s = New-Object System.Speech.Synthesis.SpeechSynthesizer',
-						`$v = \"${voice.replace(/\"/g, '')}\"`,
-						'if ($v) { $m = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Name -like \"*$v*\" } | Select-Object -First 1; if ($m) { $s.SelectVoice($m.VoiceInfo.Name) } }',
-						`$s.SetOutputToWaveFile(\"${outFile.replace(/\"/g, '')}\")`,
+						`$v = "${voice.replace(/"/g, '')}"`,
+						'if ($v) { $m = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Name -like "*$v*" } | Select-Object -First 1; if ($m) { $s.SelectVoice($m.VoiceInfo.Name) } }',
+						`$s.SetOutputToWaveFile("${outFile.replace(/"/g, '')}")`,
 						'$s.Speak($text)',
 						'$s.Dispose()'
 					].join('; ')
@@ -382,7 +394,11 @@ function runSystemTts(
 				reject(checkErr instanceof Error ? checkErr : new Error(String(checkErr)));
 				return;
 			}
-			resolve({ file: tmpOut, contentType: resolved.contentType, cleanup: () => cleanup(tmpIn, tmpOut) });
+			resolve({
+				file: tmpOut,
+				contentType: resolved.contentType,
+				cleanup: () => cleanup(tmpIn, tmpOut)
+			});
 		};
 
 		const timer = setTimeout(() => {
@@ -589,7 +605,7 @@ function resolveCli(cmd: string): string {
 		try {
 			if (existsSync(full) && statSync(full).isFile()) return full;
 		} catch {
-		/* keep probing */
+			/* keep probing */
 		}
 	}
 	return cmd; // fall back to PATH lookup; ENOENT handler names the fix
@@ -611,7 +627,11 @@ function runEdgeTts(
 		const argv = voice
 			? ['--voice', voice, '--file', tmpIn, '--write-media', tmpOut]
 			: ['--file', tmpIn, '--write-media', tmpOut];
-		const child = spawn(resolveCli('edge-tts'), argv, { shell: false, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+		const child = spawn(resolveCli('edge-tts'), argv, {
+			shell: false,
+			stdio: ['ignore', 'ignore', 'pipe'],
+			windowsHide: true
+		});
 
 		const done = (err: Error | null): void => {
 			if (settled) return;
@@ -646,7 +666,9 @@ function runEdgeTts(
 		child.on('error', (err) => {
 			const missing =
 				err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT'
-					? new Error('edge-tts CLI not found — install it (`pip install edge-tts`) or switch the TTS engine in Settings')
+					? new Error(
+							'edge-tts CLI not found — install it (`pip install edge-tts`) or switch the TTS engine in Settings'
+						)
 					: err;
 			done(missing instanceof Error ? missing : new Error(String(missing)));
 		});
@@ -701,12 +723,14 @@ async function runCloudTts(opts: {
 			body: JSON.stringify(body),
 			// Budget and cancellation share one signal; `AbortSignal.any` keeps
 			// both without a wrapper promise.
-			signal: signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal]) : AbortSignal.timeout(timeoutMs)
+			signal: signal
+				? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal])
+				: AbortSignal.timeout(timeoutMs)
 		});
 	} catch (err) {
 		if (signal?.aborted) throw abortError();
 		if (err instanceof DOMException && err.name === 'TimeoutError') {
-			throw new Error(`${engine} TTS timed out after ${timeoutMs}ms`);
+			throw new Error(`${engine} TTS timed out after ${timeoutMs}ms`, { cause: err });
 		}
 		throw err;
 	}
@@ -789,7 +813,11 @@ async function dispatchChunk(
 	const tts = resolveTts(settings);
 
 	if (tts.provider === 'system') {
-		const { file, contentType, cleanup: done } = await runSystemTts(text, tts.voice, timeoutMs, signal);
+		const {
+			file,
+			contentType,
+			cleanup: done
+		} = await runSystemTts(text, tts.voice, timeoutMs, signal);
 		try {
 			return { audio: readFileSync(file), contentType };
 		} finally {
@@ -797,7 +825,11 @@ async function dispatchChunk(
 		}
 	}
 	if (tts.provider === 'edge') {
-		const { file, contentType, cleanup: done } = await runEdgeTts(text, tts.voice, timeoutMs, signal);
+		const {
+			file,
+			contentType,
+			cleanup: done
+		} = await runEdgeTts(text, tts.voice, timeoutMs, signal);
 		try {
 			return { audio: readFileSync(file), contentType };
 		} finally {
