@@ -32,12 +32,16 @@
 		updateElectricArcs,
 		type ElectricArcSystem
 	} from './electricArcs';
+	import { createAudioReactive } from './audioReactive';
 
 	let {
 		mode = 'idle',
+		audioElement,
 		onTelemetry = () => {}
 	}: {
 		mode?: GlobeState;
+		/** Live `<audio>` element from TTS playback — routed into the WebAudio graph. */
+		audioElement?: HTMLMediaElement;
 		onTelemetry?: (t: {
 			nodes: number;
 			edges: number;
@@ -176,6 +180,24 @@
 	let lastPointer = { x: 0, y: 0 };
 	let inertiaX = 0;
 	let inertiaY = 0;
+
+	// Audio-reactive pipeline (created in init, used in frameStep)
+	let audioReactive: ReturnType<typeof createAudioReactive> | null = null;
+
+	// React to the audioElement prop: connect the WebAudio graph while TTS plays
+	// and drop it when playback ends (speak() sets currentAudio, stopSpeaking()
+	// clears it — that lifecycle, not the derived `mode`, owns the audio).
+	// The prop read comes first so the effect always re-subscribes, even when it
+	// bails before init() has created the pipeline.
+	$effect(() => {
+		const el = audioElement;
+		if (!audioReactive) return;
+		if (el) {
+			audioReactive.start(el);
+		} else {
+			audioReactive.stop();
+		}
+	});
 
 	// Frame statistics for the telemetry rail
 	let dtEma = 1 / 60;
@@ -325,6 +347,9 @@
 		// Clock
 		clock = new THREE.Clock();
 
+		// Audio-reactive pipeline (created once, started/stopped via the audioElement prop)
+		audioReactive = createAudioReactive();
+
 		// Listeners
 		window.addEventListener('resize', onResize);
 		document.addEventListener('visibilitychange', onVisibilityChange);
@@ -451,6 +476,46 @@
 
 		// Update connection shader
 		connectionSystem.material.uniforms.uTime.value = elapsed;
+
+		// === AUDIO-REACTIVE UNIFORMS (P1-3) ===
+		if (audioReactive) {
+			const bands = audioReactive.sample(deltaTime);
+
+			// Node material: bass drives point size (vertex shader uAudioBass)
+			nodeMaterial.uniforms.uAudioBass.value = bands.bass;
+			// Finding 5: mid-band warmth is set on the node fragment shader.
+			nodeMaterial.uniforms.uAudioMid.value = bands.mid;
+
+			// Connection material: mid-band boosts brightness
+			connectionSystem.material.uniforms.uAudioMid.value = bands.mid;
+
+			// Ambient particles: opacity scales with high band (blueprint "particles = high → count")
+			ambientSystem.material.opacity = 0.12 + bands.high * 0.35;
+
+			// Speech lifts the state bloom on top of cfg.bloom (neutral at 0 —
+			// the idle animation above is untouched when no audio plays)
+			const audioLevel = (bands.bass + bands.mid + bands.high) / 3;
+			bloomPass.strength += audioLevel * 0.4;
+
+			// Globe scale: bass drives bigger motion than sibilance (blueprint: scale = 1.0 + amplitude * 0.15)
+			globeGroup.scale.setScalar(1 + bands.bass * 0.15);
+
+			// Dev/QA readback: the values actually applied to the uniforms this frame,
+			// so "driven by the analyser" is measured rather than inferred (DEV only).
+			if (import.meta.env.DEV) {
+				const w = window as Window & {
+					__globUniforms?: Record<string, number | undefined>;
+				};
+				const u = (w.__globUniforms ||= {});
+				u.bass = nodeMaterial.uniforms.uAudioBass.value;
+				u.mid = nodeMaterial.uniforms.uAudioMid.value;
+				u.connMid = connectionSystem.material.uniforms.uAudioMid.value;
+				u.ambientOpacity = ambientSystem.material.opacity;
+				u.bloom = bloomPass.strength;
+				u.scale = globeGroup.scale.x;
+				u.frames = (u.frames || 0) + 1;
+			}
+		}
 
 		// Update sparks from signals
 		updateSparks(sparkSystem, simulation.signals, nodeSystem.positions, deltaTime);

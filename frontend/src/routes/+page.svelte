@@ -107,7 +107,11 @@
 	let isListening = $state(false);
 	/** Set by a classified failure, cleared by the next send (drives globe ERROR). */
 	let isError = $state(false);
-	let currentAudio: HTMLAudioElement | null = null;
+	// $state.raw, not a plain let: NeuralGlobe reads this through the
+	// `audioElement` prop, and a plain let compiles to a derived that caches its
+	// first read — the prop would stay undefined and start() would never fire
+	// (Mirza finding 1).
+	let currentAudio = $state.raw<HTMLAudioElement | null>(null);
 	let currentAudioUrl: string | null = null;
 	let selectedProvider = $state<Provider>(DEFAULT_PROVIDER);
 	let selectedAgent = $state<Agent>(DEFAULT_AGENT);
@@ -987,7 +991,11 @@
 
 {#if browser}
 	<!-- Full-bleed neuron globe: continuous 3D rotation, state-driven animation -->
-	<NeuralGlobe mode={globeState} onTelemetry={(t) => (globeTelemetry = t)} />
+	<NeuralGlobe
+		mode={globeState}
+		audioElement={currentAudio ?? undefined}
+		onTelemetry={(t) => (globeTelemetry = t)}
+	/>
 
 	<!-- Soft radial focus scrim so text reads without ever drawing a box -->
 	<div class="focus-scrim" aria-hidden="true"></div>

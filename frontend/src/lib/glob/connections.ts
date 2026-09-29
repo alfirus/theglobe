@@ -395,13 +395,15 @@ void main() {
 export const lineFragmentShader = `
 uniform vec3 uColor;
 uniform float uTime;
+uniform float uAudioMid;
 
 varying float vActivity;
 varying float vFade;
 varying float vCross;
 
 void main() {
-  float intensity = 0.15 + vActivity * 1.5;
+  // Mid-band audio boosts connection brightness (the globe "speaks" through connections)
+  float intensity = 0.15 + vActivity * 1.5 + uAudioMid * 2.0;
   
   vec3 color = uColor * intensity;
   color = mix(color, vec3(1.0), vActivity * 0.25);
@@ -427,7 +429,8 @@ export function createConnectionMaterial(color: THREE.Color): THREE.ShaderMateri
 		fragmentShader: lineFragmentShader,
 		uniforms: {
 			uColor: { value: color },
-			uTime: { value: 0 }
+			uTime: { value: 0 },
+			uAudioMid: { value: 0 }
 		},
 		transparent: true,
 		blending: THREE.AdditiveBlending,
