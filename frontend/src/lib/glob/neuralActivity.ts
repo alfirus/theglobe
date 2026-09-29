@@ -3,7 +3,12 @@ import type { NeuralConnection, ConnectionSystem } from './connections';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 const MIN_PATH_HOPS = 4;
-const MAX_PATH_HOPS = 8;
+// 8 → 10 (design spec t_c3686ec1): a cross-cluster trip costs ~3 hops inside the
+// source cluster + 1 bridge + ~3 inside the target, so 8 hops can only just reach
+// one bridged neighbour (43.7% of random pairs). At 10 the bridged graph reaches
+// ~72% (target ≥60%). BFS semantics, MIN_PATH_HOPS and the random-walk fallback
+// are unchanged.
+const MAX_PATH_HOPS = 10;
 const MIN_EVENT_INTERVAL = 0.2;
 const MAX_EVENT_INTERVAL = 0.8;
 const NODE_ACTIVITY_DECAY = 0.95;

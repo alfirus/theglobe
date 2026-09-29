@@ -6,6 +6,15 @@
   import type { Provider } from '$lib/Settings.svelte';
   import type { Agent, UplinkMode } from '$lib/Settings.svelte';
   import * as db from '$lib/db';
+  import {
+    ChatFailure,
+    classifyHttpFailure,
+    classifyThrownError,
+    streamError,
+    type ChatError
+  } from '$lib/chatError';
+  import { logEvent, errorFields } from '$lib/log';
+  import ProviderHealth from '$lib/ProviderHealth.svelte';
   import { loadEffectiveSettings, readLocalSettings } from '$lib/settingsSync';
 
   // Visor HUD (Direction B)
@@ -87,6 +96,9 @@
   let isThinking = $state(false);
   let isStreaming = $state(false); // a reply is arriving chunk by chunk
   let isSpeaking = $state(false); // TTS playback
+  let isListening = $state(false);
+  /** Set by a classified failure, cleared by the next send (drives globe ERROR). */
+  let isError = $state(false);
   let currentAudio: HTMLAudioElement | null = null;
   let currentAudioUrl: string | null = null;
   let selectedProvider = $state<Provider>(DEFAULT_PROVIDER);
@@ -131,12 +143,24 @@
    * listening (idle / mic live) → thinking (request out, no bytes yet) →
    * speaking (reply streaming, or TTS playing). Streaming outranks thinking
    * because `isThinking` stays true for the whole request.
+   *
+   * The globe has two more: `error` (a classified failure — it outranks
+   * everything so the red actually shows, and the next send clears it) and
+   * `listening`, which now means the mic really is live instead of "idle".
    */
   const hudState = $derived<HudState>(
     isStreaming || isSpeaking ? 'speaking' : isThinking ? 'thinking' : 'listening'
   );
   const globeState = $derived<GlobeState>(
-    isStreaming || isSpeaking ? 'speaking' : isThinking ? 'thinking' : 'idle'
+    isError
+      ? 'error'
+      : isStreaming || isSpeaking
+        ? 'speaking'
+        : isThinking
+          ? 'thinking'
+          : isListening
+            ? 'listening'
+            : 'idle'
   );
 
   const activeConversation = $derived(
@@ -174,12 +198,30 @@
     return stored.map((m) => ({
       role: m.role === 'assistant' ? 'assistant' : 'user',
       text: m.content,
-      ts: typeof m.ts === 'number' ? m.ts : undefined
+      ts: typeof m.ts === 'number' ? m.ts : undefined,
+      error: m.error
     }));
   }
 
+  /**
+   * Storage boundary (state → IndexedDB).
+   *
+   * `m.error` is read out of Svelte's deep `$state`, so it arrives here as a
+   * reactivity **proxy**. A Proxy exotic object is not structured-cloneable, so
+   * `IDBObjectStore.put` rejected the entire record with
+   * `DataCloneError: … could not be cloned` and every turn that carried a
+   * classified failure silently failed to persist. Copy the three fields into a
+   * fresh plain object — the leaves are primitives, so the result clones.
+   */
   function toStoredMessages(messages: Message[]): db.Conversation['messages'] {
-    return messages.map((m) => ({ role: m.role, content: m.text, ts: m.ts }));
+    return messages.map((m) => ({
+      role: m.role,
+      content: m.text,
+      ts: m.ts,
+      error: m.error
+        ? { title: m.error.title, detail: m.error.detail, retryable: m.error.retryable }
+        : undefined
+    }));
   }
 
   // Load conversations from IndexedDB on mount
@@ -229,6 +271,7 @@
   async function createNewConversation() {
     const id = crypto.randomUUID();
     const now = Date.now();
+    isError = false;
     const newConv: Conversation = {
       id,
       title: 'New Conversation',
@@ -539,17 +582,26 @@
     // instead of slicing by position (M10 — that could delete the user's message).
     const replyId = crypto.randomUUID();
 
+    // The assistant placeholder is created *here*, not after the response
+    // headers: the transcript shows a skeleton from the instant Send is
+    // pressed, so the uplink wait never leaves a gap (QA-11-06).
+    const sentAt = Date.now();
     conversations = conversations.map((c) =>
       c.id === convId
         ? {
             ...c,
-            messages: [...c.messages, { role: 'user', text, ts: Date.now() }],
-            updatedAt: Date.now()
+            messages: [
+              ...c.messages,
+              { role: 'user', text, ts: sentAt },
+              { id: replyId, role: 'assistant', text: '', ts: sentAt, pending: true }
+            ],
+            updatedAt: sentAt
           }
         : c
     );
 
     isThinking = true;
+    isError = false; // a fresh request clears the previous failure tint
     stopRequested = false;
     timedOut = false;
     stopSpeaking();
@@ -610,27 +662,30 @@
       });
 
       if (!response.ok) {
-        pushEvent('ERROR', `provider HTTP ${response.status}`);
+        // Classify from the local API's own failure body — `status` plus the
+        // machine `code`/`upstream` it sends — and throw the classification so
+        // the catch block below renders it (QA-11-02: this used to throw a
+        // bare `Error("HTTP 502")`, which every class fell through to
+        // `unreachableError`).
+        const failure = (await response.json().catch(() => null)) as {
+          error?: unknown;
+          code?: unknown;
+          upstream?: unknown;
+        } | null;
+        const chatError: ChatError = classifyHttpFailure({
+          status: response.status,
+          code: typeof failure?.code === 'string' ? failure.code : undefined,
+          serverError: typeof failure?.error === 'string' ? failure.error : undefined,
+          upstream: typeof failure?.upstream === 'number' ? failure.upstream : undefined,
+          provider: activeUplinkId
+        });
         setStep('dispatch', 'failed', `HTTP ${response.status}`);
         setStep('wait', 'failed', 'no uplink');
-        throw new Error(`HTTP ${response.status}`);
+        throw new ChatFailure(chatError);
       }
       pushEvent('LINK', `${activeUplinkId} uplink ok · ${Date.now() - thoughtStart} ms`);
       setStep('dispatch', 'done', `${Date.now() - thoughtStart} ms`);
       setStep('wait', 'active', 'awaiting first byte');
-
-      // Empty assistant message for streaming, identified by id.
-      conversations = conversations.map((c) =>
-        c.id === convId
-          ? {
-              ...c,
-              messages: [
-                ...c.messages,
-                { id: replyId, role: 'assistant', text: '', ts: Date.now() }
-              ]
-            }
-          : c
-      );
 
       // First byte arrived → the globe/chips move from THINKING to SPEAKING.
       isStreaming = true;
@@ -642,6 +697,10 @@
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      // The server forwards `data: [DONE]` when the upstream ends cleanly; a
+      // stream that closes without it was cut short (per-uplink budget, dead
+      // provider) and only *looks* complete — say so (QA-11-08).
+      let sawDone = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -655,15 +714,26 @@
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
           const data = line.slice(6).trim();
-          if (data === '[DONE]') continue;
+          if (data === '[DONE]') {
+            sawDone = true;
+            continue;
+          }
 
-          let parsed: { content?: unknown; thinking?: unknown; role?: unknown };
+          let parsed: { content?: unknown; thinking?: unknown; role?: unknown; error?: unknown };
           try {
             parsed = JSON.parse(data);
           } catch {
             continue; // malformed frame — skip it, keep the stream alive
           }
           if (!parsed || typeof parsed !== 'object') continue;
+
+          // The server tags a stream whose upstream died mid-reply. Letting the
+          // loop finish would present truncated text as a complete answer, so
+          // stop here: the partial text stays in the bubble and the catch below
+          // renders the `stream` class with Retry (QA-11-08).
+          if (typeof parsed.error === 'string' && parsed.error !== '') {
+            throw new ChatFailure(streamError(activeUplinkId, parsed.error));
+          }
 
           // Reasoning frames render in the THOUGHT card — never in the bubble.
           if (typeof parsed.thinking === 'string' && parsed.thinking !== '') {
@@ -684,17 +754,40 @@
           if (ttsEnabled) tts.push(parsed.content);
           thoughtElapsedMs = Date.now() - thoughtStart;
           const snapshot = assistantText;
+          // First content byte → the skeleton becomes the real bubble.
           conversations = conversations.map((c) =>
             c.id === convId
               ? {
                   ...c,
                   messages: c.messages.map((m) =>
-                    m.id === replyId ? { ...m, text: snapshot } : m
+                    m.id === replyId ? { ...m, text: snapshot, pending: false } : m
                   )
                 }
               : c
           );
         }
+      }
+
+      // A reply that never carried a content frame must not stay a skeleton.
+      conversations = conversations.map((c) =>
+        c.id === convId
+          ? {
+              ...c,
+              messages: c.messages.map((m) =>
+                m.id === replyId && m.pending ? { ...m, pending: false } : m
+              )
+            }
+          : c
+      );
+
+      if (!sawDone) {
+        // Structured line only — no content, just how much arrived (QA-11-08).
+        logEvent(
+          'chat',
+          'stream_truncated',
+          { provider: activeUplinkId, frames: thoughtTokens },
+          'warn'
+        );
       }
 
       // Voice output: the streaming session already holds every sentence it
@@ -712,20 +805,42 @@
       await saveCurrentConversation();
       pushEvent('CHAT', `saved · ${thoughtTokens} frames`);
     } catch (err) {
-      console.error('Chat error:', err);
       // A failed or aborted reply must not keep speaking the part that arrived
       // (M10 keeps the text; only the audio stops).
       tts.stop();
 
-      const aborted = err instanceof DOMException && err.name === 'AbortError';
-      // No emoji in product copy — these land verbatim in the transcript.
-      let note: string;
-      if (aborted && stopRequested) note = assistantText ? '' : 'Generation stopped.';
-      else if (aborted && timedOut) note = `Timed out: ${activeUplinkId}. Try again.`;
-      else if (aborted) note = 'Generation stopped.';
-      else note = `Cannot connect to ${activeUplinkId}. Check settings.`;
+      // One classification for every failure the send path can produce (P1-2) —
+      // `classifyThrownError` itself decides whether this was the client's own
+      // Stop/timeout abort. A `null` result means the user pressed Stop: not an
+      // error class, so it must neither flash the globe nor land in the error
+      // log (QA-11-07).
+      const classification = classifyThrownError(err, {
+        provider: activeUplinkId,
+        timedOut,
+        stopRequested,
+        received: assistantText.length
+      });
 
-      pushEvent('ERROR', aborted ? 'request aborted' : note);
+      let note: string;
+      let errorView: Message['error'];
+      if (classification) {
+        // The error box in the bubble carries title + detail, so the text
+        // stays exactly what streamed — nothing is appended twice.
+        note = '';
+        errorView = {
+          title: classification.title,
+          detail: classification.detail,
+          retryable: classification.retryable
+        };
+        logEvent('chat', 'error', { kind: classification.kind, ...errorFields(err) }, 'error');
+        isError = true; // globe ERROR — cleared by the next send
+        pushEvent('ERROR', `${classification.title}: ${classification.detail}`);
+      } else {
+        note = assistantText ? '' : 'Generation stopped.';
+        errorView = undefined;
+        pushEvent('CHAT', 'generation stopped');
+      }
+
       for (const s of thoughtSteps) {
         if (s.status === 'active' || s.status === 'pending') setStep(s.id, 'failed', s.id === 'stream' ? `${thoughtTokens} tokens` : s.detail);
       }
@@ -744,14 +859,23 @@
           ? {
               ...c,
               messages: c.messages.map((m) =>
-                m.id === replyId ? { ...m, text: bubbleText } : m
+                m.id === replyId
+                  ? { ...m, text: bubbleText, pending: false, error: errorView }
+                  : m
               )
             }
           : {
               ...c,
               messages: [
                 ...c.messages,
-                { id: replyId, role: 'assistant' as const, text: bubbleText, ts: Date.now() }
+                {
+                  id: replyId,
+                  role: 'assistant' as const,
+                  text: bubbleText,
+                  ts: Date.now(),
+                  pending: false,
+                  error: errorView
+                }
               ]
             };
       });
@@ -763,6 +887,40 @@
       isThinking = false;
       isStreaming = false;
     }
+  }
+
+  /**
+   * Retry (QA-11-01): drop the failed turn and re-send the user message that
+   * produced it. Removing both halves matters — `handleSend` appends the
+   * prompt again, so keeping it would put the same user message in the
+   * history *and* in the payload.
+   */
+  function handleRetry(messageId: string) {
+    if (isThinking || !activeConversationId) return;
+    const convId = activeConversationId;
+    const conv = conversations.find((c) => c.id === convId);
+    if (!conv) return;
+
+    const idx = conv.messages.findIndex((m) => m.id === messageId);
+    if (idx < 0) return;
+
+    // Walk back from the failed reply to the prompt that triggered it.
+    let userIdx = idx;
+    while (userIdx >= 0 && conv.messages[userIdx].role !== 'user') userIdx--;
+    if (userIdx < 0) return;
+
+    const text = conv.messages[userIdx].text;
+    if (!text.trim()) return;
+
+    // Everything from the prompt onwards belongs to this attempt; later turns
+    // (possible if the user kept talking after the failure) are left alone.
+    const kept = conv.messages.filter((_, i) => i !== userIdx && i !== idx);
+    conversations = conversations.map((c) =>
+      c.id === convId ? { ...c, messages: kept, updatedAt: Date.now() } : c
+    );
+    isError = false;
+    pushEvent('CHAT', 'retry · re-sending the triggering prompt');
+    void handleSend(text);
   }
 
   function handleProviderChange(e: CustomEvent<Provider | UplinkSelection>) {
@@ -829,6 +987,7 @@
       provider={activeUplinkId}
       {jumpTick}
       onStop={stopGeneration}
+      onretry={handleRetry}
     />
   {/if}
 
@@ -874,6 +1033,7 @@
     <Composer
       disabled={isThinking}
       onsend={(text) => void handleSend(text)}
+      onlisteningchange={(listening) => (isListening = listening)}
     />
   {/if}
 
@@ -919,6 +1079,16 @@
     </span>
     <span class="tts-word">{ttsEnabled ? 'VOICE ON' : 'MUTED'}</span>
   </button>
+
+  <!-- Provider health chip in the main UI (QA-11-03): provider + latency in
+       one place, click re-probes, and an unhealthy uplink shows its reason
+       right on the chip instead of behind Settings. Gated on `settingsReady`
+       so it never probes the pre-hydration default id (a guaranteed 400). -->
+  {#if settingsReady}
+    <div class="health-dock">
+      <ProviderHealth provider={activeUplinkId} mode={uplinkMode} />
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -1016,11 +1186,27 @@
    	white-space: nowrap;
    }
 
+   /* Provider health chip — bottom left, mirroring the voice toggle. */
+   .health-dock {
+   	position: fixed;
+   	left: 20px;
+   	bottom: 20px;
+   	z-index: 90;
+   	max-width: calc(100vw - 40px);
+   }
+
    @media (max-width: 720px) {
    	.vis-footer {
    		bottom: 14px;
    		font-size: 8px;
    		letter-spacing: 1.4px;
+   	}
+   	/* On phones the composer owns the bottom edge — lift the chip into the
+   	   band between the composer and the transcript instead of overlapping. */
+   	.health-dock {
+   		left: 12px;
+   		bottom: 144px;
+   		max-width: calc(100vw - 24px);
    	}
    }
 </style>

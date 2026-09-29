@@ -1879,6 +1879,30 @@
     margin-left: auto;
   }
 
+  /* Health reason (P1-2) */
+  .health-reason {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px;
+    margin-bottom: 16px;
+    background: rgba(255, 170, 0, 0.06);
+    border: 1px solid rgba(255, 170, 0, 0.25);
+    border-radius: 8px;
+  }
+
+  .health-reason .reason-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .health-reason p {
+    margin: 0;
+    font-size: 12px;
+    color: #c0d4ff;
+    line-height: 1.5;
+  }
+
   .save-btn {
     width: 100%;
   }
