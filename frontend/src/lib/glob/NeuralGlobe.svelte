@@ -317,6 +317,22 @@
 
       // Globe scale: bass drives bigger motion than sibilance (blueprint: scale = 1.0 + amplitude * 0.15)
       globeGroup.scale.setScalar(1 + bands.bass * 0.15);
+
+      // Dev/QA readback: the values actually applied to the uniforms this frame,
+      // so "driven by the analyser" is measured rather than inferred (DEV only).
+      if (import.meta.env.DEV) {
+        const w = window as Window & {
+          __globUniforms?: Record<string, number | undefined>;
+        };
+        const u = (w.__globUniforms ||= {});
+        u.bass = nodeMaterial.uniforms.uAudioBass.value;
+        u.mid = nodeMaterial.uniforms.uAudioMid.value;
+        u.connMid = connectionSystem.material.uniforms.uAudioMid.value;
+        u.ambientOpacity = ambientSystem.material.opacity;
+        u.bloom = bloomPass.strength;
+        u.scale = globeGroup.scale.x;
+        u.frames = (u.frames || 0) + 1;
+      }
     }
 
     // Update sparks from signals
