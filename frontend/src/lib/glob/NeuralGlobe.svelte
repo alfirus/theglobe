@@ -12,7 +12,11 @@
 
 	// New architecture imports
 	import { createNodes, updateNodes, type NodeSystem } from './nodes';
-	import { createConnections, updateConnectionActivities, type ConnectionSystem } from './connections';
+	import {
+		createConnections,
+		updateConnectionActivities,
+		type ConnectionSystem
+	} from './connections';
 	import {
 		createSimulation,
 		updateSignals,
@@ -23,8 +27,12 @@
 	} from './neuralActivity';
 	import { createSparkSystem, updateSparks, type SparkSystem } from './sparks';
 	import { createAmbientParticles, updateAmbient, type AmbientSystem } from './ambient';
-	import { createElectricArcSystem, updateElectricArcs, type ElectricArcSystem } from './electricArcs';
-	import { createAudioReactive, type AudioBands } from './audioReactive';
+	import {
+		createElectricArcSystem,
+		updateElectricArcs,
+		type ElectricArcSystem
+	} from './electricArcs';
+	import { createAudioReactive } from './audioReactive';
 
 	let {
 		mode = 'idle',
@@ -287,6 +295,8 @@
 		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // cap for hiDPI + bloom
 		renderer.toneMapping = THREE.ReinhardToneMapping;
 		renderer.toneMappingExposure = 1.2;
+		// Mounting the renderer's foreign canvas element (no declarative binding exists).
+		// eslint-disable-next-line svelte/no-dom-manipulating
 		container.appendChild(renderer.domElement);
 
 		// Post-processing
@@ -365,11 +375,7 @@
 		inertiaX = dx * 0.006;
 		inertiaY = dy * 0.004;
 		globeGroup.rotation.y += inertiaX;
-		globeGroup.rotation.x = THREE.MathUtils.clamp(
-			globeGroup.rotation.x + inertiaY,
-			-0.9,
-			0.9
-		);
+		globeGroup.rotation.x = THREE.MathUtils.clamp(globeGroup.rotation.x + inertiaY, -0.9, 0.9);
 	}
 
 	function onPointerUp() {
@@ -526,11 +532,7 @@
 		globeGroup.rotation.y += smRotation * deltaTime;
 		if (!dragging) {
 			globeGroup.rotation.y += inertiaX;
-			globeGroup.rotation.x = THREE.MathUtils.clamp(
-				globeGroup.rotation.x + inertiaY,
-				-0.9,
-				0.9
-			);
+			globeGroup.rotation.x = THREE.MathUtils.clamp(globeGroup.rotation.x + inertiaY, -0.9, 0.9);
 			inertiaX *= 0.93;
 			inertiaY *= 0.93;
 			if (Math.abs(inertiaX) < 1e-5) inertiaX = 0;

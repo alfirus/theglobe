@@ -68,18 +68,27 @@ function cpuFromOs(): number | null {
 	const list = cpus();
 	if (list.length === 0) return null;
 
-	if (previousCpus && previousCpus.length === list.length && now - previousSampleAt >= MIN_CPU_SAMPLE_MS) {
+	if (
+		previousCpus &&
+		previousCpus.length === list.length &&
+		now - previousSampleAt >= MIN_CPU_SAMPLE_MS
+	) {
 		let idle = 0;
 		let total = 0;
 		for (let i = 0; i < list.length; i++) {
 			const before = previousCpus[i].times;
 			const after = list[i].times;
 			const diff =
-				after.user - before.user +
-				after.nice - before.nice +
-			after.sys - before.sys +
-				after.idle - before.idle +
-				after.irq - before.irq;
+				after.user -
+				before.user +
+				after.nice -
+				before.nice +
+				after.sys -
+				before.sys +
+				after.idle -
+				before.idle +
+				after.irq -
+				before.irq;
 			idle += after.idle - before.idle;
 			total += diff;
 		}

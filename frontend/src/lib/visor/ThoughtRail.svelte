@@ -46,8 +46,8 @@
 	// Live reasoning is append-only: stick to the bottom as chunks arrive, so
 	// the newest thought is visible without touching the scrollbar.
 	$effect(() => {
-		thinkingTail;
-		if (thinkingEl) thinkingEl.scrollTop = thinkingEl.scrollHeight;
+		const latest = thinkingTail;
+		if (thinkingEl && latest.length > 0) thinkingEl.scrollTop = thinkingEl.scrollHeight;
 	});
 
 	const rate = $derived(() => {
@@ -79,11 +79,25 @@
 					{#if s.status === 'active'}
 						<span class="spin"></span>
 					{:else if s.status === 'done'}
-						<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6">
+						<svg
+							viewBox="0 0 24 24"
+							width="11"
+							height="11"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.6"
+						>
 							<path d="M5 12.5l4.5 4.5L19 7.5"></path>
 						</svg>
 					{:else if s.status === 'failed'}
-						<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6">
+						<svg
+							viewBox="0 0 24 24"
+							width="11"
+							height="11"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.6"
+						>
 							<path d="M6 6l12 12M18 6L6 18"></path>
 						</svg>
 					{:else}
@@ -104,12 +118,12 @@
 			</div>
 		{/if}
 
-	{#if thinking}
-		<div class="thinking" aria-label="Model reasoning">
-			<span class="thinking-key">THINKING</span>
-			<span class="thinking-text" bind:this={thinkingEl}>{thinkingTail}</span>
-		</div>
-	{/if}
+		{#if thinking}
+			<div class="thinking" aria-label="Model reasoning">
+				<span class="thinking-key">THINKING</span>
+				<span class="thinking-text" bind:this={thinkingEl}>{thinkingTail}</span>
+			</div>
+		{/if}
 	</div>
 </aside>
 
@@ -317,49 +331,49 @@
 		animation: live 1s ease-in-out infinite;
 	}
 
-	  .phase-text {
-	    font-family: var(--font-mono);
-	    font-size: 10.5px;
-	    color: var(--hud-steel);
-	    overflow: hidden;
-	    text-overflow: ellipsis;
-	    white-space: nowrap;
-	  }
+	.phase-text {
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		color: var(--hud-steel);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
 
-	  /* Reasoning streamed by the provider — after the steps, same HUD voice:
+	/* Reasoning streamed by the provider — after the steps, same HUD voice:
 	     label + mono tail, scrollable, never a filled box. `flex: 1` stretches
 	     it to the card bottom; the text scroller takes whatever is left. */
-	  .thinking {
-	    display: flex;
-	    flex-direction: column;
-	    gap: 6px;
-	    padding-top: 8px;
-	    border-top: 1px solid var(--hud-line);
-	    flex: 1;
-	    min-height: 120px;
-	  }
+	.thinking {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding-top: 8px;
+		border-top: 1px solid var(--hud-line);
+		flex: 1;
+		min-height: 120px;
+	}
 
-	  .thinking-key {
-	    font-family: var(--font-hud);
-	    font-size: 9.5px;
-	    font-weight: 600;
-	    letter-spacing: 2px;
-	    color: var(--hud-cyan);
-	    text-transform: uppercase;
-	    flex-shrink: 0;
-	  }
+	.thinking-key {
+		font-family: var(--font-hud);
+		font-size: 9.5px;
+		font-weight: 600;
+		letter-spacing: 2px;
+		color: var(--hud-cyan);
+		text-transform: uppercase;
+		flex-shrink: 0;
+	}
 
-	  .thinking-text {
-	    font-family: var(--font-mono);
-	    font-size: 10px;
-	    line-height: 1.55;
-	    color: var(--hud-steel);
-	    white-space: pre-wrap;
-	    word-break: break-word;
-	    flex: 1;
-	    min-height: 0;
-	    overflow-y: auto;
-	  }
+	.thinking-text {
+		font-family: var(--font-mono);
+		font-size: 10px;
+		line-height: 1.55;
+		color: var(--hud-steel);
+		white-space: pre-wrap;
+		word-break: break-word;
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+	}
 
 	@media (max-width: 1180px) {
 		.thought {

@@ -67,7 +67,9 @@
 					try {
 						const data: unknown = await res.json();
 						const healthy =
-							!!data && typeof data === 'object' && (data as { healthy?: unknown }).healthy === true;
+							!!data &&
+							typeof data === 'object' &&
+							(data as { healthy?: unknown }).healthy === true;
 						const err =
 							!!data && typeof data === 'object'
 								? String((data as { error?: unknown }).error ?? '')

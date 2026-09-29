@@ -80,8 +80,8 @@ async function callProvider(
 	} catch (err) {
 		if (err instanceof DOMException && err.name === 'TimeoutError') {
 			console.error(`Provider timeout (${url}) after ${timeoutMs}ms`);
-		const timeout = new Error(`Provider timed out after ${timeoutMs}ms`);
-		(timeout as NodeJS.ErrnoException).code = 'UPSTREAM_TIMEOUT';
+			const timeout = new Error(`Provider timed out after ${timeoutMs}ms`);
+			(timeout as NodeJS.ErrnoException).code = 'UPSTREAM_TIMEOUT';
 			throw timeout;
 		}
 		throw err;
@@ -149,12 +149,7 @@ async function callProvider(
 							// Skip malformed upstream frames — one line for the first, then a count.
 							malformedFrames += 1;
 							if (malformedFrames === 1) {
-								logEvent(
-									'chat',
-									'upstream_frame_malformed',
-									{ bytes: data.length },
-									'warn'
-								);
+								logEvent('chat', 'upstream_frame_malformed', { bytes: data.length }, 'warn');
 							}
 						}
 					}
@@ -245,7 +240,9 @@ export const POST: RequestHandler = async ({ request }) => {
 		uplinkId = providerId;
 	}
 
-	const config = isAgent(uplinkId) ? resolveAgent(uplinkId, settings) : resolveConfig(uplinkId, settings);
+	const config = isAgent(uplinkId)
+		? resolveAgent(uplinkId, settings)
+		: resolveConfig(uplinkId, settings);
 
 	if (!config.baseUrl) {
 		return json(
@@ -254,7 +251,10 @@ export const POST: RequestHandler = async ({ request }) => {
 		);
 	}
 	if (!isAllowedUrl(config.baseUrl)) {
-		return json({ error: `URL not allowed: ${config.baseUrl}`, code: 'url_not_allowed' }, { status: 400 });
+		return json(
+			{ error: `URL not allowed: ${config.baseUrl}`, code: 'url_not_allowed' },
+			{ status: 400 }
+		);
 	}
 
 	// Contract: systemPrompt in the body (H5). The legacy X-System-Prompt header is
@@ -284,7 +284,14 @@ export const POST: RequestHandler = async ({ request }) => {
 		// Bearer auth. The `providerId` param only picks auth headers, and no
 		// agent uses MiMo's `api-key` header, so providers pass their own id.
 		const authId: Provider = isAgent(uplinkId) ? 'hermes' : uplinkId;
-		return await callProvider(authId, config.baseUrl, config.apiKey, config.model, config.timeoutMs, messages);
+		return await callProvider(
+			authId,
+			config.baseUrl,
+			config.apiKey,
+			config.model,
+			config.timeoutMs,
+			messages
+		);
 	} catch (err) {
 		console.error('Chat error:', err instanceof Error ? err.message : 'unknown error');
 		if ((err as NodeJS.ErrnoException)?.code === 'UPSTREAM_TIMEOUT') {

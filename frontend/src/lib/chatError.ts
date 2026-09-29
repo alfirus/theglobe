@@ -185,7 +185,9 @@ export function classifyHttpFailure({
 		code === 'provider_auth' ||
 		upstream === 401 ||
 		upstream === 403 ||
-		((status === 502 || status === 503) && upstream !== undefined && (upstream === 401 || upstream === 403))
+		((status === 502 || status === 503) &&
+			upstream !== undefined &&
+			(upstream === 401 || upstream === 403))
 	) {
 		return authError(provider, upstream ?? status);
 	}
@@ -225,6 +227,7 @@ export function classifyThrownError(err: unknown, ctx: ThrownFailure): ChatError
 
 	// Bytes already reached the user → the stream died mid-reply; no bytes →
 	// the provider never answered at all. Same `catch`, different user advice.
-	if (ctx.received > 0) return streamError(ctx.provider, aborted ? 'aborted_mid_stream' : 'read_failed');
+	if (ctx.received > 0)
+		return streamError(ctx.provider, aborted ? 'aborted_mid_stream' : 'read_failed');
 	return unreachableError(ctx.provider, err instanceof Error ? err.message : String(err));
 }

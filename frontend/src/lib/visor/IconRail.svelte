@@ -28,28 +28,67 @@
 			class:active
 			onclick={onToggleConversations}
 			title="Conversations (⌘1)"
+			aria-label="Conversations"
 			aria-pressed={active}
 		>
-			<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6">
+			<svg
+				viewBox="0 0 24 24"
+				width="16"
+				height="16"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.6"
+			>
 				<circle cx="12" cy="12" r="7"></circle>
 				<circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none"></circle>
 			</svg>
 		</button>
 
-		<button class="rail-btn" onclick={onNew} title="New conversation">
-			<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6">
+		<button class="rail-btn" onclick={onNew} title="New conversation" aria-label="New conversation">
+			<svg
+				viewBox="0 0 24 24"
+				width="16"
+				height="16"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.6"
+			>
 				<path d="M12 5v14M5 12h14"></path>
 			</svg>
 		</button>
 
-		<button class="rail-btn" onclick={onFocusComposer} title="Focus composer">
-			<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6">
+		<button
+			class="rail-btn"
+			onclick={onFocusComposer}
+			title="Focus composer"
+			aria-label="Focus composer"
+		>
+			<svg
+				viewBox="0 0 24 24"
+				width="16"
+				height="16"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.6"
+			>
 				<path d="M12 3l2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12l6.8-2.2z"></path>
 			</svg>
 		</button>
 
-		<button class="rail-btn" onclick={onFocusTranscript} title="Jump to latest">
-			<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6">
+		<button
+			class="rail-btn"
+			onclick={onFocusTranscript}
+			title="Jump to latest"
+			aria-label="Jump to latest"
+		>
+			<svg
+				viewBox="0 0 24 24"
+				width="16"
+				height="16"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.6"
+			>
 				<path d="M5 7h14M5 12h14M5 17h9"></path>
 			</svg>
 		</button>
