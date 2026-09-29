@@ -10,7 +10,17 @@ const DB_VERSION = 1;
 export interface Conversation {
 	id: string;
 	title: string;
-	messages: Array<{ role: 'user' | 'assistant'; content: string; ts?: number }>;
+	messages: Array<{
+		role: 'user' | 'assistant';
+		content: string;
+		ts?: number;
+		/**
+		 * The classified failure that ended this turn (`chatError.ts`). Stored so
+		 * the error box — title, detail and the Retry button — survives a reload
+		 * instead of collapsing into an unexplained empty bubble.
+		 */
+		error?: { title: string; detail: string; retryable: boolean };
+	}>;
 	provider: string;
 	systemPrompt?: string;
 	createdAt: number;

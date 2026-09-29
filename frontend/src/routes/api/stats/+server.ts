@@ -83,8 +83,6 @@ function cpuFromOs(): number | null {
 				before.user +
 				after.nice -
 				before.nice +
-				// `os.cpus().times` exposes `sys`, not `system` — reading `.system`
-				// made this delta NaN (QA defect D7).
 				after.sys -
 				before.sys +
 				after.idle -

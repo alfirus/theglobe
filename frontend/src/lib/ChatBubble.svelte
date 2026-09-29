@@ -1,5 +1,6 @@
 <script module lang="ts">
 	import DOMPurify from 'dompurify';
+	import { logEvent } from '$lib/log';
 
 	/**
 	 * DOMPurify whitelists `data:` URIs for a few tags (`img`, `audio`, `video`, …)
@@ -29,6 +30,18 @@
 
 <script lang="ts">
 	import { marked } from 'marked';
+	import { createEventDispatcher } from 'svelte';
+
+	/**
+	 * The classified failure riding on a turn (P1-2). Mirrors the fields of
+	 * `ChatError` the UI is allowed to show — `code`/`status`/`upstream`/`reason`
+	 * stay in the logs, never in the bubble.
+	 */
+	export type MessageError = {
+		title: string;
+		detail: string;
+		retryable: boolean;
+	};
 
 	export type Message = {
 		/** Client-only identity used to target the right bubble while streaming (see +page.svelte). */
@@ -37,9 +50,23 @@
 		text: string;
 		/** Client-only timestamp — the Visor HUD prints it in the turn header. */
 		ts?: number;
+		/** Set from Send until the first byte: renders the pending skeleton. */
+		pending?: boolean;
+		/** Present when this turn ended in a classified failure — drives the error box. */
+		error?: MessageError;
 	};
 
 	let { message }: { message: Message } = $props();
+	let bubbleRef: HTMLDivElement;
+
+	// Retry dispatches a custom event so the parent can walk back to this message's user prompt
+	const retryDispatch = createEventDispatcher<{ retry: { messageId: string } }>();
+
+	function handleRetry() {
+		if (message.id) {
+			retryDispatch('retry', { messageId: message.id });
+		}
+	}
 
 	/**
 	 * Sanitizer configuration for rendered markdown.
@@ -124,8 +151,14 @@
 		try {
 			const html = marked.parse(text, { async: false, breaks: true, gfm: true });
 			return DOMPurify.sanitize(html, SANITIZE_OPTIONS);
-		} catch {
+		} catch (err) {
 			// Returning the raw text here would reopen the injection hole — escape it.
+			logEvent(
+				'render',
+				'markdown_failed',
+				{ errName: err instanceof Error ? err.name : String(err) },
+				'warn'
+			);
 			return escapeHtml(text);
 		}
 	}
@@ -133,8 +166,33 @@
 
 <div class="message {message.role}">
 	<span class="role">{message.role === 'user' ? 'You' : 'Globe'}</span>
-	{#if message.role === 'assistant'}
+	{#if message.pending}
+		<!-- Send-time placeholder: three pulsing dots until the first byte lands. -->
+		<div class="skeleton" role="status" aria-label="Generating a reply">
+			<span class="dot"></span>
+			<span class="dot"></span>
+			<span class="dot"></span>
+		</div>
+	{:else if message.role === 'assistant'}
 		<div class="text markdown-content">{@html renderMarkdown(message.text)}</div>
+		{#if message.error}
+			<!-- Classified failure: its own title + detail, and a Retry only when
+           the class is actually retryable (P1-2 / QA-11-01). -->
+			<div class="error-box" role="alert">
+				<span class="error-title">{message.error.title}</span>
+				<span class="error-detail">{message.error.detail}</span>
+				{#if message.error.retryable}
+					<button
+						type="button"
+						class="retry-btn"
+						onclick={handleRetry}
+						title="Send this message again"
+					>
+						Retry
+					</button>
+				{/if}
+			</div>
+		{/if}
 	{:else}
 		<!-- Svelte escapes interpolated text, so this renders inert by construction. -->
 		<div class="text plain-text">{message.text}</div>
@@ -273,6 +331,81 @@
 		to {
 			opacity: 1;
 			transform: translateY(0);
+		}
+	}
+
+	/* Pending skeleton (P1-2) */
+	.skeleton {
+		display: flex;
+		gap: 4px;
+		padding: 8px 0;
+	}
+
+	.skeleton .dot {
+		width: 6px;
+		height: 6px;
+		background: rgba(68, 136, 255, 0.4);
+		border-radius: 50%;
+		animation: pulse 1.2s ease-in-out infinite;
+	}
+
+	.skeleton .dot:nth-child(2) {
+		animation-delay: 0.2s;
+	}
+	.skeleton .dot:nth-child(3) {
+		animation-delay: 0.4s;
+	}
+
+	/* Error bubble (P1-2) */
+	.error-box {
+		padding: 8px 12px;
+		background: rgba(255, 107, 107, 0.08);
+		border: 1px solid rgba(255, 107, 107, 0.3);
+		border-radius: 8px;
+		margin-top: 4px;
+	}
+
+	.error-title {
+		font-size: 13px;
+		font-weight: 600;
+		color: #ff6b6b;
+		display: block;
+	}
+
+	.error-detail {
+		font-size: 12px;
+		color: #c0d4ff;
+		margin: 4px 0 8px 0;
+		line-height: 1.5;
+	}
+
+	.retry-btn {
+		padding: 4px 12px;
+		background: rgba(255, 107, 107, 0.15);
+		border: 1px solid rgba(255, 107, 107, 0.5);
+		border-radius: 6px;
+		color: #ff6b6b;
+		font-size: 12px;
+		font-weight: 600;
+		cursor: pointer;
+		transition: all 0.2s ease;
+	}
+
+	.retry-btn:hover {
+		background: rgba(255, 107, 107, 0.3);
+		box-shadow: 0 0 12px rgba(255, 107, 107, 0.3);
+	}
+
+	@keyframes pulse {
+		0%,
+		80%,
+		100% {
+			opacity: 0.3;
+			transform: scale(0.8);
+		}
+		40% {
+			opacity: 1;
+			transform: scale(1.2);
 		}
 	}
 </style>

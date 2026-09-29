@@ -1,6 +1,6 @@
 <script module lang="ts">
 	/** The globe animates differently in each app state (owner requirement). */
-	export type GlobeState = 'idle' | 'thinking' | 'speaking';
+	export type GlobeState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'error';
 </script>
 
 <script lang="ts">
@@ -76,8 +76,13 @@
 
 	/**
 	 * Per-state render config. Every value is smoothed frame-to-frame, so the
-	 * globe transitions between IDLE → THINKING → RESPONDING instead of
-	 * hard-swapping (owner: "animated while idle, thinking and respond").
+	 * globe transitions between IDLE → LISTENING → THINKING → RESPONDING instead
+	 * of hard-swapping (owner: "animated while idle, thinking and respond").
+	 *
+	 * `listening` is dictation (mic live): the blue brightens and sparks fire
+	 * faster. `error` is a provider failure: red, high activity, and it eases back
+	 * to whatever comes next because the same smoothing does the fading
+	 * (BLUEPRINT.md §4 "Error — red flash → fade back to blue").
 	 *
 	 * rotation — rad/s: idle is the spec's ~0.05 rad/s base spin; thinking
 	 * accelerates so the effort is visible; responding settles in between.
@@ -107,6 +112,19 @@
 			outward: 0,
 			color: new THREE.Color(0x5ecdf2)
 		},
+		listening: {
+			// Mic live: the blue brightens towards white and the sparks quicken —
+			// "alert, paying attention" (BLUEPRINT §4 / §5 LISTENING).
+			rotation: 0.07,
+			bloom: 0.3,
+			bloomOsc: 0.1,
+			boost: 0.6,
+			spawn: 2.4,
+			speed: 1.7,
+			inward: 0,
+			outward: 0,
+			color: new THREE.Color(0xd8f6ff)
+		},
 		thinking: {
 			rotation: 0.12,
 			bloom: 0.42,
@@ -128,6 +146,20 @@
 			inward: 0,
 			outward: 1,
 			color: new THREE.Color(0xffc14d)
+		},
+		error: {
+			// Provider failure: the network goes red and over-active, then the
+			// same smoothing fades it back once the next state takes over
+			// ("Shake + red flash … decay back to idle", BLUEPRINT §5).
+			rotation: 0.16,
+			bloom: 0.5,
+			bloomOsc: 0.3,
+			boost: 1.4,
+			spawn: 3.2,
+			speed: 2.6,
+			inward: 0,
+			outward: 1,
+			color: new THREE.Color(0xff4d4d)
 		}
 	};
 
