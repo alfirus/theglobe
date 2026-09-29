@@ -148,7 +148,7 @@
 	const MAX_RECORD_MS = 60_000;
 	let mediaStream: MediaStream | null = null;
 	let recorder: MediaRecorder | null = null;
-	let chunks: BlobPart[] = [];
+	let chunks: Blob[] = [];
 	let recordTimer: ReturnType<typeof setTimeout> | null = null;
 	let requestingMic = false;
 
@@ -158,7 +158,12 @@
 	}
 
 	function pickMimeType(): string | undefined {
-		const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+		const candidates = [
+			'audio/webm;codecs=opus',
+			'audio/webm',
+			'audio/ogg;codecs=opus',
+			'audio/mp4'
+		];
 		for (const type of candidates) {
 			if (MediaRecorder.isTypeSupported(type)) return type;
 		}
@@ -202,7 +207,9 @@
 
 		const mimeType = pickMimeType();
 		try {
-			recorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
+			recorder = mimeType
+				? new MediaRecorder(mediaStream, { mimeType })
+				: new MediaRecorder(mediaStream);
 		} catch {
 			releaseMic();
 			reportError('Audio recording failed to start — nothing was sent.');
@@ -258,13 +265,20 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ audio, mimeType: blob.type, language })
 			});
-			const data = (await response.json().catch(() => null)) as { text?: string; error?: string } | null;
+			const data = (await response.json().catch(() => null)) as {
+				text?: string;
+				error?: string;
+			} | null;
 			if (!response.ok) {
 				throw new Error(data?.error || `Speech engine error (HTTP ${response.status})`);
 			}
 			commitTranscript(data?.text ?? '');
 		} catch (err) {
-			reportError(err instanceof Error && err.message ? err.message : 'Speech recognition failed — nothing was sent.');
+			reportError(
+				err instanceof Error && err.message
+					? err.message
+					: 'Speech recognition failed — nothing was sent.'
+			);
 		} finally {
 			isTranscribing = false;
 		}
@@ -274,9 +288,11 @@
 	async function probeServer() {
 		try {
 			const response = await fetch('/api/stt', { headers: { Accept: 'application/json' } });
-			const data = (await response.json().catch(() => null)) as
-				| { available?: boolean; engine?: string; reason?: string }
-				| null;
+			const data = (await response.json().catch(() => null)) as {
+				available?: boolean;
+				engine?: string;
+				reason?: string;
+			} | null;
 			if (response.ok && data?.available) {
 				voiceMode = 'whisper';
 				engineLabel = data.engine === 'openai-whisper' ? 'WHISPER · TORCH' : 'WHISPER · LOCAL';
@@ -292,7 +308,10 @@
 	}
 
 	onMount(() => {
-		const win = window as unknown as { SpeechRecognition?: unknown; webkitSpeechRecognition?: unknown };
+		const win = window as unknown as {
+			SpeechRecognition?: unknown;
+			webkitSpeechRecognition?: unknown;
+		};
 		const Ctor = win.SpeechRecognition ?? win.webkitSpeechRecognition;
 		if (Ctor) {
 			voiceMode = 'web-speech';
@@ -469,7 +488,14 @@
 			title={micTitle}
 			aria-label={micTitle}
 		>
-			<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6">
+			<svg
+				viewBox="0 0 24 24"
+				width="16"
+				height="16"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.6"
+			>
 				<rect x="9" y="3" width="6" height="11" rx="3"></rect>
 				<path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path>
 			</svg>
@@ -488,9 +514,9 @@
 				onfocuschange(false);
 			}}
 			type="text"
-			placeholder={placeholder}
+			{placeholder}
 			aria-label="Message the Globe"
-			disabled={disabled}
+			{disabled}
 			oninput={() => {
 				if (voiceError) voiceError = '';
 			}}

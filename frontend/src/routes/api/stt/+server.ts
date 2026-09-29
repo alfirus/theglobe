@@ -153,7 +153,7 @@ let probeCache: { at: number; value: Probe } | null = null;
  */
 async function probeInterpreter(python: string): Promise<string | null> {
 	const code =
-		"import importlib.util as u,sys;" +
+		'import importlib.util as u,sys;' +
 		"sys.stdout.write('faster-whisper' if u.find_spec('faster_whisper') else ('openai-whisper' if u.find_spec('whisper') else ''))";
 	return new Promise((resolve) => {
 		let done = false;
@@ -164,7 +164,11 @@ async function probeInterpreter(python: string): Promise<string | null> {
 			}
 		};
 		let out = '';
-		const child = spawn(python, ['-c', code], { shell: false, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+		const child = spawn(python, ['-c', code], {
+			shell: false,
+			stdio: ['ignore', 'pipe', 'ignore'],
+			windowsHide: true
+		});
 		child.stdout.on('data', (chunk: Buffer) => (out += chunk.toString('utf8')));
 		child.on('error', () => finish(null));
 		child.on('close', () => {
@@ -215,7 +219,11 @@ async function capability(): Promise<Probe> {
 // ── warm worker (POST) ───────────────────────────────────────────────────
 
 type WorkerReply = { id?: number; text?: string; ms?: number; error?: string; code?: string };
-type Pending = { resolve: (reply: WorkerReply) => void; reject: (err: Error & { code?: string }) => void; timer: ReturnType<typeof setTimeout> };
+type Pending = {
+	resolve: (reply: WorkerReply) => void;
+	reject: (err: Error & { code?: string }) => void;
+	timer: ReturnType<typeof setTimeout>;
+};
 type WorkerHandle = {
 	child: ReturnType<typeof spawn>;
 	engine: string;
@@ -299,7 +307,11 @@ function spawnCandidate(python: string, script: string, model: string): Promise<
 			if (settled) return;
 			settled = true;
 			child.kill();
-			reject(Object.assign(new Error(`${python} did not become ready in ${SPAWN_TIMEOUT_MS / 1000}s`), { code: 'spawn_timeout' }));
+			reject(
+				Object.assign(new Error(`${python} did not become ready in ${SPAWN_TIMEOUT_MS / 1000}s`), {
+					code: 'spawn_timeout'
+				})
+			);
 		}, SPAWN_TIMEOUT_MS);
 
 		const fail = (err: Error & { code?: string }): void => {
@@ -350,12 +362,18 @@ function spawnCandidate(python: string, script: string, model: string): Promise<
 			resolve(handle);
 		});
 		child.on('error', (err) =>
-			fail(Object.assign(new Error(`cannot run ${python}: ${err.message}`), { code: 'python_not_found' }))
+			fail(
+				Object.assign(new Error(`cannot run ${python}: ${err.message}`), {
+					code: 'python_not_found'
+				})
+			)
 		);
 		child.on('exit', (code) =>
 			fail(
 				Object.assign(
-					new Error(`STT worker exited before ready (code ${code})${stderrTail ? `: ${stderrTail.trim().slice(-400)}` : ''}`),
+					new Error(
+						`STT worker exited before ready (code ${code})${stderrTail ? `: ${stderrTail.trim().slice(-400)}` : ''}`
+					),
 					{ code: 'engine_unavailable' }
 				)
 			)
@@ -366,7 +384,9 @@ function spawnCandidate(python: string, script: string, model: string): Promise<
 async function startWorker(): Promise<WorkerHandle> {
 	const { path } = workerScript();
 	if (!path) {
-		throw Object.assign(new Error('stt_worker.py not found — set STT_WORKER'), { code: 'engine_unavailable' });
+		throw Object.assign(new Error('stt_worker.py not found — set STT_WORKER'), {
+			code: 'engine_unavailable'
+		});
 	}
 	const model = sttModel();
 	const reasons: string[] = [];
@@ -375,7 +395,12 @@ async function startWorker(): Promise<WorkerHandle> {
 		try {
 			const handle = await spawnCandidate(python, path, model);
 			lastSpawnError = null;
-			logEvent('stt', 'worker_ready', { engine: handle.engine, model, python, spawnMs: Date.now() - startedAt });
+			logEvent('stt', 'worker_ready', {
+				engine: handle.engine,
+				model,
+				python,
+				spawnMs: Date.now() - startedAt
+			});
 			// An engine that is warmed but never used must not sit in RAM.
 			touchIdle(handle);
 			return handle;
@@ -386,10 +411,9 @@ async function startWorker(): Promise<WorkerHandle> {
 			lastSpawnError = { code, error: message };
 		}
 	}
-	const error = Object.assign(
-		new Error(`No usable STT interpreter — ${reasons.join(' ; ')}`),
-		{ code: 'engine_unavailable' }
-	);
+	const error = Object.assign(new Error(`No usable STT interpreter — ${reasons.join(' ; ')}`), {
+		code: 'engine_unavailable'
+	});
 	logEvent('stt', 'worker_start_failed', { candidates: reasons.length }, 'error');
 	throw error;
 }
@@ -417,14 +441,23 @@ function touchIdle(handle: WorkerHandle): void {
 	handle.idle.unref?.();
 }
 
-function transcribe(handle: WorkerHandle, path: string, language: string | undefined, timeoutMs: number): Promise<WorkerReply> {
+function transcribe(
+	handle: WorkerHandle,
+	path: string,
+	language: string | undefined,
+	timeoutMs: number
+): Promise<WorkerReply> {
 	return new Promise((resolve, reject) => {
 		const id = handle.nextId++;
 		const timer = setTimeout(() => {
 			handle.pending.delete(id);
 			// A wedged model must not block the next attempt: recycle the worker.
 			stopWorker(handle, 'transcription timed out');
-			reject(Object.assign(new Error(`transcription exceeded ${Math.round(timeoutMs / 1000)}s`), { code: 'transcribe_timeout' }));
+			reject(
+				Object.assign(new Error(`transcription exceeded ${Math.round(timeoutMs / 1000)}s`), {
+					code: 'transcribe_timeout'
+				})
+			);
 		}, timeoutMs);
 		handle.pending.set(id, { resolve, reject, timer });
 		const payload = JSON.stringify({ id, path, ...(language ? { language } : {}) });
@@ -433,7 +466,11 @@ function transcribe(handle: WorkerHandle, path: string, language: string | undef
 		} catch (err) {
 			clearTimeout(timer);
 			handle.pending.delete(id);
-			reject(Object.assign(new Error(err instanceof Error ? err.message : String(err)), { code: 'worker_stopped' }));
+			reject(
+				Object.assign(new Error(err instanceof Error ? err.message : String(err)), {
+					code: 'worker_stopped'
+				})
+			);
 		}
 	});
 }
@@ -455,7 +492,8 @@ export const GET: RequestHandler = async ({ request }) => {
 			logEvent('stt', 'warm_failed', { err: String(err).slice(0, 200) }, 'warn');
 		});
 	}
-	const payload = lastSpawnError && !probe.available ? { ...probe, lastError: lastSpawnError.error } : probe;
+	const payload =
+		lastSpawnError && !probe.available ? { ...probe, lastError: lastSpawnError.error } : probe;
 	return json(payload, { status: probe.available ? 200 : 503 });
 };
 
@@ -472,19 +510,28 @@ export const POST: RequestHandler = async ({ request }) => {
 	}
 
 	if (typeof body.audio !== 'string' || !body.audio) {
-		return json({ error: 'Missing `audio` (base64 clip)', code: 'invalid_request' }, { status: 400 });
+		return json(
+			{ error: 'Missing `audio` (base64 clip)', code: 'invalid_request' },
+			{ status: 400 }
+		);
 	}
 	const bytes = Buffer.from(body.audio, 'base64');
 	if (!bytes.length) {
 		return json({ error: 'Empty audio payload', code: 'invalid_request' }, { status: 400 });
 	}
 	if (bytes.length > MAX_AUDIO_BYTES) {
-		return json({ error: `Clip exceeds ${MAX_AUDIO_BYTES / (1024 * 1024)} MB`, code: 'too_large' }, { status: 413 });
+		return json(
+			{ error: `Clip exceeds ${MAX_AUDIO_BYTES / (1024 * 1024)} MB`, code: 'too_large' },
+			{ status: 413 }
+		);
 	}
 	const mime = typeof body.mimeType === 'string' ? body.mimeType : '';
 	const ext = extensionFor(mime, bytes);
 	if (!ext) {
-		return json({ error: `Unsupported audio type: ${mime || 'unknown'}`, code: 'unsupported_media' }, { status: 415 });
+		return json(
+			{ error: `Unsupported audio type: ${mime || 'unknown'}`, code: 'unsupported_media' },
+			{ status: 415 }
+		);
 	}
 	const language = normalizeLanguage(body.language);
 
@@ -511,7 +558,15 @@ export const POST: RequestHandler = async ({ request }) => {
 	} catch (err) {
 		const code = (err as { code?: string }).code ?? 'transcribe_failed';
 		const message = err instanceof Error ? err.message : String(err);
-		const status = code === 'transcribe_timeout' ? 504 : code === 'engine_unavailable' || code === 'python_not_found' || code === 'spawn_timeout' || code === 'worker_stopped' ? 503 : 500;
+		const status =
+			code === 'transcribe_timeout'
+				? 504
+				: code === 'engine_unavailable' ||
+					  code === 'python_not_found' ||
+					  code === 'spawn_timeout' ||
+					  code === 'worker_stopped'
+					? 503
+					: 500;
 		logEvent('stt', 'transcribe_failed', { code, status, err: message.slice(0, 300) }, 'error');
 		return json({ error: message, code }, { status });
 	} finally {
