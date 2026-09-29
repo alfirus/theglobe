@@ -14,7 +14,8 @@
 		isStreaming = false,
 		provider = 'hermes',
 		jumpTick = 0,
-		onStop = () => {}
+		onStop = () => {},
+		onretry = () => {}
 	}: {
 		messages?: Message[];
 		isThinking?: boolean;
@@ -22,6 +23,8 @@
 		provider?: string;
 		jumpTick?: number;
 		onStop?: () => void;
+		/** A failed turn asked to be re-sent — the page walks back to its prompt. */
+		onretry?: (messageId: string) => void;
 	} = $props();
 
 	let listEl: HTMLDivElement;
@@ -85,7 +88,7 @@
 				</div>
 				<div class="rule"></div>
 				<div class="body">
-					<ChatBubble message={msg} />
+					<ChatBubble message={msg} on:retry={(e) => onretry(e.detail.messageId)} />
 				</div>
 			</article>
 		{/each}

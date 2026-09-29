@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Salvage artifacts — a git object store must never be committed (PR #11 review)
+/objects/
+
 # Build output
 .svelte-kit/
 frontend/.svelte-kit/
