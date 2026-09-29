@@ -21,7 +21,7 @@
   import { createElectricArcSystem, updateElectricArcs, type ElectricArcSystem } from './electricArcs';
   import { createAudioReactive, type AudioBands } from './audioReactive';
 
-  let { isSpeaking = false, isThinking = false }: { isSpeaking?: boolean; isThinking?: boolean } = $props();
+  let { isSpeaking = false, isThinking = false, audioElement }: { isSpeaking?: boolean; isThinking?: boolean; audioElement?: HTMLMediaElement } = $props();
 
   let container: HTMLDivElement;
   let animationId: number;
@@ -67,19 +67,16 @@
   // Audio-reactive pipeline (created in init, used in frameStep)
   let audioReactive: ReturnType<typeof createAudioReactive> | null = null;
 
-  // React to isSpeaking prop: start/stop the WebAudio graph
+  // React to isSpeaking + audioElement props: start/stop the WebAudio graph.
   $effect(() => {
     const _ = isSpeaking; // track dependency
     if (!audioReactive) return;
-    if (isSpeaking && currentMediaElement) {
-      audioReactive.start(currentMediaElement);
+    if (isSpeaking && audioElement) {
+      audioReactive.start(audioElement);
     } else if (!isSpeaking) {
       audioReactive.stop();
     }
   });
-
-  // Reference to the <audio> element so NeuralGlobe can connect it to WebAudio
-  let currentMediaElement: HTMLMediaElement | null = null;
 
   onMount(() => {
     init();
@@ -303,6 +300,8 @@
 
       // Node material: bass drives point size (already in shader via uAudioBass)
       nodeMaterial.uniforms.uAudioBass.value = bands.bass;
+      // Finding 5: mid-band warmth is now set on the node fragment shader.
+      nodeMaterial.uniforms.uAudioMid.value = bands.mid;
 
       // Connection material: mid-band boosts brightness
       connectionSystem.material.uniforms.uAudioMid.value = bands.mid;

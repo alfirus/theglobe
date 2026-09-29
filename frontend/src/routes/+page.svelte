@@ -502,7 +502,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div class="globe-wrapper" onclick={handleGlobeClick}>
-    <NeuralGlobe {isSpeaking} {isThinking} />
+    <NeuralGlobe {isSpeaking} {isThinking} audioElement={currentAudio ?? undefined} />
   </div>
 
   <!-- Chat history: single card on the LEFT side -->

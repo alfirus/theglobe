@@ -40,8 +40,8 @@ interface Smoother {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /** One exponential-smoothed channel. */
-function makeSmoother(initialValue = 0, rate = RELEASE_RATE): Smoother {
-  return { value: initialValue, target: initialValue, attackRate: rate, releaseRate: rate };
+function makeSmoother(initialValue = 0, attackRate = ATTACK_RATE, releaseRate = RELEASE_RATE): Smoother {
+  return { value: initialValue, target: initialValue, attackRate, releaseRate };
 }
 
 /** Update a smoother towards its target with frame-rate-independent lerp. */
@@ -78,8 +78,8 @@ export function createAudioReactive(): {
   let analyser: AnalyserNode | null = null;
   let sourceConnected = false;
 
-  // Track MediaElementSourceNodes so we can disconnect them on re-connect.
-  const mediaSources: MediaElementAudioSourceNode[] = [];
+  // Cache MediaElementSourceNodes per element so createMediaElementSource is called only once (WebAudio spec: throws on second call for same element).
+  const mediaSourceCache = new Map<HTMLMediaElement, MediaElementAudioSourceNode>();
 
   // Frequency data buffer — allocated once, reused every frame.
   const freqData = new Uint8Array(FFT_SIZE / 2); // binCount = fftSize/2
@@ -146,23 +146,21 @@ export function createAudioReactive(): {
 
     // Disconnect previous source if any, then connect new one → analyser → destination (speakers)
     try {
-      // If it's an AudioBufferSourceNode, disconnect it first in case reused
       if (source instanceof AudioBufferSourceNode) {
+        // Finding 3: explicitly connect buffer-source to analyser (was missing).
         source.disconnect();
+        source.connect(analyser);
       } else if (source instanceof HTMLMediaElement) {
-        // Disconnect any existing MediaElementSource before reconnecting
-        for (const ms of mediaSources) {
-          try { ms.disconnect(); } catch {}
+        // Finding 4: cache MediaElementSource per element — createMediaElementSource throws on second call for same element.
+        let mediaSource = mediaSourceCache.get(source);
+        if (!mediaSource) {
+          mediaSource = ctx.createMediaElementSource(source);
+          mediaSourceCache.set(source, mediaSource);
+        } else {
+          // Reconnect cached source to analyser (previous graph may have been disconnected).
+          try { mediaSource.disconnect(); } catch {}
         }
-        mediaSources.length = 0;
-
-        const mediaSource = ctx.createMediaElementSource(source);
-        mediaSources.push(mediaSource);
-        // Cast to AudioNode so TypeScript knows connect() exists
-        (mediaSource as AudioNode).connect(analyser);
-      } else {
-        // Fallback: cast union member to AudioNode for connect()
-        (source as AudioNode).connect(analyser);
+        mediaSource.connect(analyser);
       }
 
       analyser.connect(ctx.destination);

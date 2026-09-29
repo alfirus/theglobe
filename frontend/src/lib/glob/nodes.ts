@@ -223,9 +223,10 @@ void main() {
 }
 `;
 
-export const nodeFragmentShader = `
+export const nodeFragmentShader = `\
 uniform vec3 uColor;
 uniform float uTime;
+uniform float uAudioMid;
 
 varying float vBrightness;
 varying float vPhase;
@@ -254,6 +255,12 @@ void main() {
   // Activity makes nodes brighter and more white
   color = mix(color, vec3(1.0), vActivity * 0.4);
   
+  // Finding 5: mid-band audio adds warmth (amber tint) to the fragment —
+  // this is the "warmth" effect claimed in the handoff summary.
+  float warmth = uAudioMid * 0.3;
+  color.r += warmth * 0.6;
+  color.g += warmth * 0.4;
+  
   gl_FragColor = vec4(color * intensity * vBrightness, intensity);
 }
 `;
@@ -267,7 +274,8 @@ export function createNodeMaterial(color: THREE.Color): THREE.ShaderMaterial {
       uBrightness: { value: 0.9 },
       uColor: { value: color },
       uActivityBoost: { value: 0 },
-      uAudioBass: { value: 0 }
+      uAudioBass: { value: 0 },
+      uAudioMid: { value: 0 }
     },
     transparent: true,
     blending: THREE.AdditiveBlending,
