@@ -1,4 +1,4 @@
-# The Glob — Frontend (SvelteKit + Three.js)
+# The Globe — Frontend (SvelteKit + Three.js)
 
 SvelteKit app that renders the neural globe (Three.js + GLSL) and the chat
 UI. The server routes under `src/routes/api/*` are the app's entire backend

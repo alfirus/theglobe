@@ -3,7 +3,12 @@ import type { NeuralConnection, ConnectionSystem } from './connections';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 const MIN_PATH_HOPS = 4;
-const MAX_PATH_HOPS = 8;
+// 8 → 10 (design spec t_c3686ec1): a cross-cluster trip costs ~3 hops inside the
+// source cluster + 1 bridge + ~3 inside the target, so 8 hops can only just reach
+// one bridged neighbour (43.7% of random pairs). At 10 the bridged graph reaches
+// ~72% (target ≥60%). BFS semantics, MIN_PATH_HOPS and the random-walk fallback
+// are unchanged.
+const MAX_PATH_HOPS = 10;
 const MIN_EVENT_INTERVAL = 0.2;
 const MAX_EVENT_INTERVAL = 0.8;
 const NODE_ACTIVITY_DECAY = 0.95;
@@ -208,14 +213,16 @@ export function updateSignals(
   simulation: NeuralSimulation,
   nodes: NeuralNode[],
   _connectionSystem: ConnectionSystem,
-  deltaTime: number
+  deltaTime: number,
+  /** State multiplier — THINKING/SPEAKING drive pulses faster (default 1). */
+  speedMul = 1
 ): void {
   for (let i = 0; i < simulation.signals.length; i++) {
     const signal = simulation.signals[i];
     if (!signal.active) continue;
 
     // Move along current connection
-    signal.progress += deltaTime * signal.speed;
+    signal.progress += deltaTime * signal.speed * speedMul;
 
     // Activate the connection we're traveling on
     const currentHop = signal.path[signal.connectionIndex];
@@ -286,16 +293,22 @@ export function updateSimulationTimer(
   simulation: NeuralSimulation,
   nodes: NeuralNode[],
   connectionSystem: ConnectionSystem,
-  deltaTime: number
+  deltaTime: number,
+  /**
+   * State multiplier for how often a new pulse is spawned (default 1).
+   * THINKING raises it so the globe visibly energises; SPEAKING sits between.
+   */
+  spawnRate = 1
 ): void {
   simulation.eventTimer -= deltaTime;
 
   if (simulation.eventTimer <= 0) {
     triggerNeuralEvent(nodes, connectionSystem, simulation);
 
-    // Random interval for next event
-    simulation.nextEventInterval = MIN_EVENT_INTERVAL +
-      Math.random() * (MAX_EVENT_INTERVAL - MIN_EVENT_INTERVAL);
+    // Random interval for next event, scaled by the current state
+    const base =
+      MIN_EVENT_INTERVAL + Math.random() * (MAX_EVENT_INTERVAL - MIN_EVENT_INTERVAL);
+    simulation.nextEventInterval = base / Math.max(spawnRate, 0.05);
     simulation.eventTimer = simulation.nextEventInterval;
   }
 }

@@ -1,14 +1,34 @@
 <script lang="ts">
   import { browser } from '$app/environment';
-  import NeuralGlobe from '$lib/glob/NeuralGlobe.svelte';
-  import ChatInput from '$lib/ChatInput.svelte';
-  import ChatBubble from '$lib/ChatBubble.svelte';
-  import DeviceStats from '$lib/DeviceStats.svelte';
-  import Settings from '$lib/Settings.svelte';
-  import type { Provider } from '$lib/Settings.svelte';
-  import ConversationSidebar from '$lib/ConversationSidebar.svelte';
+  import NeuralGlobe, { type GlobeState } from '$lib/glob/NeuralGlobe.svelte';
   import type { Message } from '$lib/ChatBubble.svelte';
+  import Settings, { type UplinkSelection } from '$lib/Settings.svelte';
+  import type { Provider } from '$lib/Settings.svelte';
+  import type { Agent, UplinkMode } from '$lib/Settings.svelte';
   import * as db from '$lib/db';
+  import {
+    ChatFailure,
+    classifyHttpFailure,
+    classifyThrownError,
+    streamError,
+    type ChatError
+  } from '$lib/chatError';
+  import { logEvent, errorFields } from '$lib/log';
+  import ProviderHealth from '$lib/ProviderHealth.svelte';
+  import { loadEffectiveSettings, readLocalSettings } from '$lib/settingsSync';
+
+  // Visor HUD (Direction B)
+  import Frame from '$lib/visor/Frame.svelte';
+  import LensOverlay from '$lib/visor/LensOverlay.svelte';
+  import TopBar, { type HudState } from '$lib/visor/TopBar.svelte';
+  import IconRail from '$lib/visor/IconRail.svelte';
+  import TelemetryRail, { type GlobeTelemetry } from '$lib/visor/TelemetryRail.svelte';
+  import TranscriptZone from '$lib/visor/TranscriptZone.svelte';
+  import Composer from '$lib/visor/Composer.svelte';
+  import ConversationsPanel from '$lib/visor/ConversationsPanel.svelte';
+  import ThoughtRail, { type ThoughtStep } from '$lib/visor/ThoughtRail.svelte';
+  import OpsLog from '$lib/visor/OpsLog.svelte';
+  import { pushEvent } from '$lib/events';
 
   /**
    * In-memory conversation. Carries `createdAt`/`updatedAt` alongside the
@@ -24,17 +44,60 @@
   };
 
   const DEFAULT_PROVIDER: Provider = 'hermes';
-  const PROVIDERS: Provider[] = ['hermes', 'lmstudio', 'opencode', 'openrouter', 'deepseek', 'openclaw'];
+  const PROVIDERS: Provider[] = ['hermes', 'lmstudio', 'opencode', 'openrouter', 'deepseek', 'openclaw', 'mimo'];
+  const DEFAULT_AGENT: Agent = 'hermes-agent';
+  const AGENTS: Agent[] = ['hermes-agent', 'openclaw-agent'];
 
-  /** No byte from the server for this long → abort the request (P0-3). */
+  /**
+   * Idle watchdog fallback (P0-3): no byte from the server for this long →
+   * abort the request. The per-provider `timeoutMs` (from effective settings,
+   * default 120 s) replaces this whenever it resolves — the constant only
+   * covers the window before hydration.
+   */
   const CHAT_TIMEOUT_MS = 120_000;
+  const MIN_CHAT_TIMEOUT_MS = 5_000;
+  const MAX_CHAT_TIMEOUT_MS = 600_000;
+
+  // Per-uplink wall-clock budget in ms, from effective settings (`configs.*.
+  // timeoutMs` / `agents.*.timeoutMs`; server fills what this browser never
+  // set). Starts at the fallback and is replaced on hydration and on every
+  // uplink switch.
+  let uplinkTimeouts = $state<Record<string, number>>({});
+
+  function clampTimeoutMs(raw: unknown): number {
+    if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return CHAT_TIMEOUT_MS;
+    return Math.min(Math.max(Math.round(raw), MIN_CHAT_TIMEOUT_MS), MAX_CHAT_TIMEOUT_MS);
+  }
+
+  function chatTimeoutMs(id: string): number {
+    return clampTimeoutMs(uplinkTimeouts[id]);
+  }
+
+  function adoptTimeouts(settings: {
+    configs?: Record<string, { timeoutMs?: unknown }>;
+    agents?: Record<string, { timeoutMs?: unknown }>;
+  }): void {
+    for (const section of [settings.configs, settings.agents]) {
+      if (!section || typeof section !== 'object') continue;
+      for (const [id, cfg] of Object.entries(section)) {
+        if (!cfg || typeof cfg !== 'object') continue;
+        const ms = (cfg as { timeoutMs?: unknown }).timeoutMs;
+        if (typeof ms === 'number' && Number.isFinite(ms) && ms > 0) {
+          uplinkTimeouts[id] = clampTimeoutMs(ms);
+        }
+      }
+    }
+  }
 
   // State management for multi-conversation support
   let conversations: Conversation[] = $state([]);
   let activeConversationId: string | null = $state(null);
-  let showInput = $state(false);
   let isThinking = $state(false);
-  let isSpeaking = $state(false);
+  let isStreaming = $state(false); // a reply is arriving chunk by chunk
+  let isSpeaking = $state(false); // TTS playback
+  let isListening = $state(false);
+  /** Set by a classified failure, cleared by the next send (drives globe ERROR). */
+  let isError = $state(false);
   // $state.raw, not a plain let: NeuralGlobe reads this through the
   // `audioElement` prop, and a plain let compiles to a derived that caches its
   // first read — the prop would stay undefined and start() would never fire
@@ -42,7 +105,35 @@
   let currentAudio = $state.raw<HTMLAudioElement | null>(null);
   let currentAudioUrl: string | null = null;
   let selectedProvider = $state<Provider>(DEFAULT_PROVIDER);
+  let selectedAgent = $state<Agent>(DEFAULT_AGENT);
+  let uplinkMode = $state<UplinkMode>('provider');
   let systemPrompt = $state('');
+
+  /** Id shown in the HUD + thought rail for the active uplink. */
+  const activeUplinkId = $derived<string>(
+    uplinkMode === 'agent' ? selectedAgent : selectedProvider
+  );
+
+  // THOUGHT rail: one step per chat lifecycle stage, pushed from handleSend.
+  let thoughtSteps = $state<ThoughtStep[]>([]);
+  let thoughtPhase = $state('');
+  let thoughtTokens = $state(0);
+  // Provider reasoning (`reasoning_content` on MiMo/DeepSeek), rendered in the
+  // THOUGHT card under the lifecycle steps. Reset per request like the rest.
+  let thoughtThinking = $state('');
+  let thoughtStart = 0;
+  let thoughtElapsedMs = $state(0);
+
+  function setStep(id: string, status: ThoughtStep['status'], detail?: string) {
+    thoughtSteps = thoughtSteps.map((s) => (s.id === id ? { ...s, status, detail: detail ?? s.detail } : s));
+  }
+
+  // HUD chrome state
+  let settingsReady = $state(false); // server settings resolved at least once
+  let settingsOpen = $state(false);
+  let conversationsOpen = $state(false);
+  let jumpTick = $state(0);
+  let globeTelemetry = $state<GlobeTelemetry | null>(null);
 
   // In-flight chat request: the controller backs the stop button and the timeout.
   let chatController: AbortController | null = null;
@@ -50,18 +141,43 @@
   let stopRequested = false;
   let timedOut = false;
 
-  interface LocalSettings {
-    provider?: unknown;
-    systemPrompt?: unknown;
-  }
+  /**
+   * The chips and the globe both mirror these three real states:
+   * listening (idle / mic live) → thinking (request out, no bytes yet) →
+   * speaking (reply streaming, or TTS playing). Streaming outranks thinking
+   * because `isThinking` stays true for the whole request.
+   *
+   * The globe has two more: `error` (a classified failure — it outranks
+   * everything so the red actually shows, and the next send clears it) and
+   * `listening`, which now means the mic really is live instead of "idle".
+   */
+  const hudState = $derived<HudState>(
+    isStreaming || isSpeaking ? 'speaking' : isThinking ? 'thinking' : 'listening'
+  );
+  const globeState = $derived<GlobeState>(
+    isError
+      ? 'error'
+      : isStreaming || isSpeaking
+        ? 'speaking'
+        : isThinking
+          ? 'thinking'
+          : isListening
+            ? 'listening'
+            : 'idle'
+  );
 
-  function readLocalSettings(): LocalSettings {
-    try {
-      return JSON.parse(localStorage.getItem('globe-settings') || '{}');
-    } catch {
-      return {};
-    }
-  }
+  const activeConversation = $derived(
+    conversations.find((c) => c.id === activeConversationId) ?? null
+  );
+  const activeMessages = $derived(activeConversation?.messages ?? []);
+  const panelConversations = $derived(
+    conversations.map((c) => ({
+      id: c.id,
+      title: c.title,
+      messageCount: c.messages.length,
+      updatedAt: c.updatedAt
+    }))
+  );
 
   /** Accept only real provider ids — a corrupt/garbage value falls back (H4). */
   function normalizeProvider(value: unknown): Provider {
@@ -70,15 +186,45 @@
       : DEFAULT_PROVIDER;
   }
 
+  /** Accept only real agent ids — same fallback contract as providers. */
+  function normalizeAgent(value: unknown): Agent {
+    return typeof value === 'string' && (AGENTS as string[]).includes(value)
+      ? (value as Agent)
+      : DEFAULT_AGENT;
+  }
+
+  function normalizeUplinkMode(value: unknown): UplinkMode {
+    return value === 'agent' ? 'agent' : 'provider';
+  }
+
   function toUiMessages(stored: db.Conversation['messages']): Message[] {
     return stored.map((m) => ({
       role: m.role === 'assistant' ? 'assistant' : 'user',
-      text: m.content
+      text: m.content,
+      ts: typeof m.ts === 'number' ? m.ts : undefined,
+      error: m.error
     }));
   }
 
+  /**
+   * Storage boundary (state → IndexedDB).
+   *
+   * `m.error` is read out of Svelte's deep `$state`, so it arrives here as a
+   * reactivity **proxy**. A Proxy exotic object is not structured-cloneable, so
+   * `IDBObjectStore.put` rejected the entire record with
+   * `DataCloneError: … could not be cloned` and every turn that carried a
+   * classified failure silently failed to persist. Copy the three fields into a
+   * fresh plain object — the leaves are primitives, so the result clones.
+   */
   function toStoredMessages(messages: Message[]): db.Conversation['messages'] {
-    return messages.map((m) => ({ role: m.role, content: m.text }));
+    return messages.map((m) => ({
+      role: m.role,
+      content: m.text,
+      ts: m.ts,
+      error: m.error
+        ? { title: m.error.title, detail: m.error.detail, retryable: m.error.retryable }
+        : undefined
+    }));
   }
 
   // Load conversations from IndexedDB on mount
@@ -86,9 +232,21 @@
     if (!browser) return;
 
     try {
-      const settings = readLocalSettings();
+      // D1: localStorage is not the only source of truth. On a fresh profile it
+      // is empty, and without the server's prefill the first message went out
+      // against an unconfigured provider (`502 Cannot connect to hermes`).
+      // Local values still win — this only fills what the browser never set.
+      const settings = await loadEffectiveSettings();
       selectedProvider = normalizeProvider(settings.provider);
+      selectedAgent = normalizeAgent(settings.agent);
+      uplinkMode = normalizeUplinkMode(settings.uplinkMode);
       systemPrompt = typeof settings.systemPrompt === 'string' ? settings.systemPrompt : '';
+      // Per-provider uplink budgets for the chat watchdog (server prefill fills
+      // what this browser never set, same as provider/base URL/model).
+      adoptTimeouts(settings);
+      // Only now may the telemetry rail probe the active provider — before this
+      // the page still holds the default id, which has no base URL (a 400).
+      settingsReady = true;
 
       const stored = await db.getConversations();
 
@@ -108,6 +266,7 @@
       }
     } catch (err) {
       console.error('Failed to load conversations:', err);
+      settingsReady = true;
       await createNewConversation();
     }
   }
@@ -115,6 +274,7 @@
   async function createNewConversation() {
     const id = crypto.randomUUID();
     const now = Date.now();
+    isError = false;
     const newConv: Conversation = {
       id,
       title: 'New Conversation',
@@ -125,7 +285,6 @@
 
     conversations = [newConv, ...conversations];
     activeConversationId = id;
-    showInput = true;
 
     // Save to IndexedDB
     try {
@@ -145,6 +304,7 @@
 
   async function selectConversation(id: string) {
     activeConversationId = id;
+    conversationsOpen = false;
 
     const conv = conversations.find((c) => c.id === id);
     if (conv) {
@@ -173,12 +333,11 @@
       console.warn('Could not load conversation:', err);
     }
 
-    showInput = true;
+    jumpTick++;
   }
 
   async function deleteConversation(id: string) {
     conversations = conversations.filter((c) => c.id !== id);
-
     if (activeConversationId === id) {
       activeConversationId = null;
 
@@ -202,7 +361,6 @@
 
     const conv = conversations.find((c) => c.id === activeConversationId);
     if (!conv) return;
-
     // Auto-generate the title from the first user message. The condition used to
     // be inverted (M9): it only renamed conversations that already had a custom
     // title, so fresh chats stayed "New Conversation" forever while titled chats
@@ -236,11 +394,29 @@
     }
   }
 
-  function handleGlobeClick() {
-    if (!activeConversationId) {
-      createNewConversation();
-    } else {
-      showInput = true;
+  // Read-replies-aloud toggle: persisted locally (it is a device preference, not
+  // provider config), default ON. Toggling off stops any in-flight playback.
+  const TTS_TOGGLE_KEY = 'globe-tts-enabled';
+  let ttsEnabled = $state(true);
+
+  function loadTtsToggle(): void {
+    try {
+      const raw = localStorage.getItem(TTS_TOGGLE_KEY);
+      // Absent key = first run = ON; only an explicit "0" disables.
+      ttsEnabled = raw !== '0';
+    } catch {
+      ttsEnabled = true;
+    }
+  }
+
+  function toggleTts(): void {
+    ttsEnabled = !ttsEnabled;
+    if (!ttsEnabled) stopSpeaking();
+    pushEvent('TTS', ttsEnabled ? 'voice output on' : 'voice output off');
+    try {
+      localStorage.setItem(TTS_TOGGLE_KEY, ttsEnabled ? '1' : '0');
+    } catch {
+      /* private window — the toggle still works for this session */
     }
   }
 
@@ -260,17 +436,25 @@
   }
 
   async function speak(text: string) {
+    if (!ttsEnabled) return;
     stopSpeaking();
     isSpeaking = true;
+    // Log length, never content.
+    pushEvent('TTS', `synthesising ${text.length} chars`);
 
     try {
       const response = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
+        body: JSON.stringify({ text }),
+        // Synthesis budget: the global TTS cap (server enforces the same).
+        signal: AbortSignal.timeout(130_000)
       });
 
-      if (!response.ok) throw new Error('TTS failed');
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '');
+        throw new Error(detail || 'TTS failed');
+      }
 
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
@@ -283,18 +467,24 @@
 
       await audio.play();
     } catch (err) {
-      console.error('Piper TTS error:', err);
+      const reason = err instanceof Error && err.message ? err.message : 'TTS failed';
+      console.error('TTS error:', reason);
+      // The server message names the fix (`edge-tts CLI not found — install…`,
+      // `TTS API key not configured — set…`); surfacing it in the rail beats a
+      // bare "tts failed" that sends the owner hunting.
+      pushEvent('ERROR', `tts failed · ${reason.slice(0, 160)}`);
+      setStep('speak', 'failed', reason.slice(0, 80));
       // Covers both "play() rejected" and "fetch failed" — nothing leaks.
       stopSpeaking();
     }
   }
 
-  function armChatTimeout(controller: AbortController) {
+  function armChatTimeout(controller: AbortController, uplinkId: string) {
     clearChatTimeout();
     chatTimeout = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, CHAT_TIMEOUT_MS);
+    }, chatTimeoutMs(uplinkId));
   }
 
   function clearChatTimeout() {
@@ -308,11 +498,15 @@
   function stopGeneration() {
     if (!chatController) return;
     stopRequested = true;
+    pushEvent('CHAT', 'stop requested');
     chatController.abort();
   }
 
-  async function handleSend(e: CustomEvent<string>) {
-    const text = e.detail;
+  function focusComposer() {
+    window.dispatchEvent(new Event('glob:focus-composer'));
+  }
+
+  async function handleSend(text: string) {
     if (!text.trim() || !activeConversationId || isThinking) return;
 
     const convId = activeConversationId;
@@ -326,16 +520,43 @@
     // instead of slicing by position (M10 — that could delete the user's message).
     const replyId = crypto.randomUUID();
 
+    // The assistant placeholder is created *here*, not after the response
+    // headers: the transcript shows a skeleton from the instant Send is
+    // pressed, so the uplink wait never leaves a gap (QA-11-06).
+    const sentAt = Date.now();
     conversations = conversations.map((c) =>
       c.id === convId
-        ? { ...c, messages: [...c.messages, { role: 'user', text }], updatedAt: Date.now() }
+        ? {
+            ...c,
+            messages: [
+              ...c.messages,
+              { role: 'user', text, ts: sentAt },
+              { id: replyId, role: 'assistant', text: '', ts: sentAt, pending: true }
+            ],
+            updatedAt: sentAt
+          }
         : c
     );
 
     isThinking = true;
+    isError = false; // a fresh request clears the previous failure tint
     stopRequested = false;
     timedOut = false;
     stopSpeaking();
+
+    // THOUGHT rail: fresh run, one step per lifecycle stage.
+    thoughtStart = Date.now();
+    thoughtTokens = 0;
+    thoughtThinking = '';
+    thoughtElapsedMs = 0;
+    thoughtSteps = [
+      { id: 'dispatch', label: 'Dispatch', detail: `${activeUplinkId} · ${history.length} history`, status: 'active' },
+      { id: 'wait', label: 'Uplink wait', detail: 'awaiting first byte', status: 'pending' },
+      { id: 'stream', label: 'Stream', detail: '0 tokens', status: 'pending' },
+      { id: 'speak', label: 'Speak', detail: 'tts', status: 'pending' }
+    ];
+    thoughtPhase = `connecting to ${activeUplinkId}`;
+    pushEvent('CHAT', `dispatch → ${activeUplinkId} · ${history.length} history`);
 
     // Read the prompt at send time: Settings writes to localStorage, and the owner
     // may have edited it after this component mounted.
@@ -347,7 +568,7 @@
 
     const controller = new AbortController();
     chatController = controller;
-    armChatTimeout(controller);
+    armChatTimeout(controller, activeUplinkId);
 
     let assistantText = '';
 
@@ -356,7 +577,10 @@
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Provider': selectedProvider
+          'X-Provider': selectedProvider,
+          // Agent uplink: the server routes on this pair (mode + entry).
+          'X-Uplink-Mode': uplinkMode,
+          'X-Agent': selectedAgent
           // H5: the system prompt travels in the body, never as a header —
           // the server reads `systemPrompt` from the JSON it already parses,
           // and non-Latin-1 header values make fetch throw.
@@ -369,23 +593,51 @@
         signal: controller.signal
       });
 
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        // Classify from the local API's own failure body — `status` plus the
+        // machine `code`/`upstream` it sends — and throw the classification so
+        // the catch block below renders it (QA-11-02: this used to throw a
+        // bare `Error("HTTP 502")`, which every class fell through to
+        // `unreachableError`).
+        const failure = (await response.json().catch(() => null)) as {
+          error?: unknown;
+          code?: unknown;
+          upstream?: unknown;
+        } | null;
+        const chatError: ChatError = classifyHttpFailure({
+          status: response.status,
+          code: typeof failure?.code === 'string' ? failure.code : undefined,
+          serverError: typeof failure?.error === 'string' ? failure.error : undefined,
+          upstream: typeof failure?.upstream === 'number' ? failure.upstream : undefined,
+          provider: activeUplinkId
+        });
+        setStep('dispatch', 'failed', `HTTP ${response.status}`);
+        setStep('wait', 'failed', 'no uplink');
+        throw new ChatFailure(chatError);
+      }
+      pushEvent('LINK', `${activeUplinkId} uplink ok · ${Date.now() - thoughtStart} ms`);
+      setStep('dispatch', 'done', `${Date.now() - thoughtStart} ms`);
+      setStep('wait', 'active', 'awaiting first byte');
 
-      // Empty assistant message for streaming, identified by id.
-      conversations = conversations.map((c) =>
-        c.id === convId
-          ? { ...c, messages: [...c.messages, { id: replyId, role: 'assistant', text: '' }] }
-          : c
-      );
+      // First byte arrived → the globe/chips move from THINKING to SPEAKING.
+      isStreaming = true;
+      setStep('wait', 'done', 'first byte');
+      setStep('stream', 'active', '0 tokens');
+      thoughtPhase = `streaming from ${activeUplinkId}`;
+      pushEvent('STREAM', 'first byte · speaking');
 
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      // The server forwards `data: [DONE]` when the upstream ends cleanly; a
+      // stream that closes without it was cut short (per-uplink budget, dead
+      // provider) and only *looks* complete — say so (QA-11-08).
+      let sawDone = false;
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        armChatTimeout(controller); // every chunk proves the request is still alive
+        armChatTimeout(controller, activeUplinkId); // every chunk proves the request is still alive
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
@@ -394,15 +646,32 @@
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
           const data = line.slice(6).trim();
-          if (data === '[DONE]') continue;
+          if (data === '[DONE]') {
+            sawDone = true;
+            continue;
+          }
 
-          let parsed: { content?: unknown; role?: unknown };
+          let parsed: { content?: unknown; thinking?: unknown; role?: unknown; error?: unknown };
           try {
             parsed = JSON.parse(data);
           } catch {
             continue; // malformed frame — skip it, keep the stream alive
           }
           if (!parsed || typeof parsed !== 'object') continue;
+
+          // The server tags a stream whose upstream died mid-reply. Letting the
+          // loop finish would present truncated text as a complete answer, so
+          // stop here: the partial text stays in the bubble and the catch below
+          // renders the `stream` class with Retry (QA-11-08).
+          if (typeof parsed.error === 'string' && parsed.error !== '') {
+            throw new ChatFailure(streamError(activeUplinkId, parsed.error));
+          }
+
+          // Reasoning frames render in the THOUGHT card — never in the bubble.
+          if (typeof parsed.thinking === 'string' && parsed.thinking !== '') {
+            thoughtThinking += parsed.thinking;
+            thoughtElapsedMs = Date.now() - thoughtStart;
+          }
 
           // Validate the frame: only assistant content may enter the bubble.
           // Frames without a role are the server's normal output and count as
@@ -411,13 +680,16 @@
           if (typeof parsed.content !== 'string' || parsed.content === '') continue;
 
           assistantText += parsed.content;
+          thoughtTokens += 1;
+          thoughtElapsedMs = Date.now() - thoughtStart;
           const snapshot = assistantText;
+          // First content byte → the skeleton becomes the real bubble.
           conversations = conversations.map((c) =>
             c.id === convId
               ? {
                   ...c,
                   messages: c.messages.map((m) =>
-                    m.id === replyId ? { ...m, text: snapshot } : m
+                    m.id === replyId ? { ...m, text: snapshot, pending: false } : m
                   )
                 }
               : c
@@ -425,21 +697,78 @@
         }
       }
 
-      // Speak with Piper TTS after streaming completes
-      if (assistantText) {
-        void speak(assistantText);
+      // A reply that never carried a content frame must not stay a skeleton.
+      conversations = conversations.map((c) =>
+        c.id === convId
+          ? {
+              ...c,
+              messages: c.messages.map((m) =>
+                m.id === replyId && m.pending ? { ...m, pending: false } : m
+              )
+            }
+          : c
+      );
+
+      if (!sawDone) {
+        // Structured line only — no content, just how much arrived (QA-11-08).
+        logEvent(
+          'chat',
+          'stream_truncated',
+          { provider: activeUplinkId, frames: thoughtTokens },
+          'warn'
+        );
+      }
+
+      // Speak with the configured TTS engine after streaming completes —
+      // skipped entirely when voice output is toggled off.
+      setStep('stream', 'done', `${thoughtTokens} tokens`);
+      const speakDetail = !assistantText ? 'empty reply' : ttsEnabled ? 'tts' : 'muted';
+      setStep('speak', assistantText && ttsEnabled ? 'active' : 'done', speakDetail);
+      thoughtPhase = '';
+      pushEvent('STREAM', `done · ${thoughtTokens} frames`);
+      if (assistantText && ttsEnabled) {
+        void speak(assistantText).finally(() => setStep('speak', 'done', 'played'));
       }
 
       await saveCurrentConversation();
+      pushEvent('CHAT', `saved · ${thoughtTokens} frames`);
     } catch (err) {
-      console.error('Chat error:', err);
+      // One classification for every failure the send path can produce (P1-2) —
+      // `classifyThrownError` itself decides whether this was the client's own
+      // Stop/timeout abort. A `null` result means the user pressed Stop: not an
+      // error class, so it must neither flash the globe nor land in the error
+      // log (QA-11-07).
+      const classification = classifyThrownError(err, {
+        provider: activeUplinkId,
+        timedOut,
+        stopRequested,
+        received: assistantText.length
+      });
 
-      const aborted = err instanceof DOMException && err.name === 'AbortError';
       let note: string;
-      if (aborted && stopRequested) note = assistantText ? '' : '⏹ Generation stopped.';
-      else if (aborted && timedOut) note = `⚠️ ${selectedProvider} timed out. Try again.`;
-      else if (aborted) note = '⏹ Generation stopped.';
-      else note = `⚠️ Cannot connect to ${selectedProvider}. Check settings.`;
+      let errorView: Message['error'];
+      if (classification) {
+        // The error box in the bubble carries title + detail, so the text
+        // stays exactly what streamed — nothing is appended twice.
+        note = '';
+        errorView = {
+          title: classification.title,
+          detail: classification.detail,
+          retryable: classification.retryable
+        };
+        logEvent('chat', 'error', { kind: classification.kind, ...errorFields(err) }, 'error');
+        isError = true; // globe ERROR — cleared by the next send
+        pushEvent('ERROR', `${classification.title}: ${classification.detail}`);
+      } else {
+        note = assistantText ? '' : 'Generation stopped.';
+        errorView = undefined;
+        pushEvent('CHAT', 'generation stopped');
+      }
+
+      for (const s of thoughtSteps) {
+        if (s.status === 'active' || s.status === 'pending') setStep(s.id, 'failed', s.id === 'stream' ? `${thoughtTokens} tokens` : s.detail);
+      }
+      thoughtPhase = '';
 
       const bubbleText =
         assistantText + (assistantText && note ? `\n\n${note}` : note);
@@ -454,12 +783,24 @@
           ? {
               ...c,
               messages: c.messages.map((m) =>
-                m.id === replyId ? { ...m, text: bubbleText } : m
+                m.id === replyId
+                  ? { ...m, text: bubbleText, pending: false, error: errorView }
+                  : m
               )
             }
           : {
               ...c,
-              messages: [...c.messages, { id: replyId, role: 'assistant' as const, text: bubbleText }]
+              messages: [
+                ...c.messages,
+                {
+                  id: replyId,
+                  role: 'assistant' as const,
+                  text: bubbleText,
+                  ts: Date.now(),
+                  pending: false,
+                  error: errorView
+                }
+              ]
             };
       });
 
@@ -468,172 +809,332 @@
       clearChatTimeout();
       chatController = null;
       isThinking = false;
+      isStreaming = false;
     }
   }
 
-  function handleProviderChange(e: CustomEvent<Provider>) {
+  /**
+   * Retry (QA-11-01): drop the failed turn and re-send the user message that
+   * produced it. Removing both halves matters — `handleSend` appends the
+   * prompt again, so keeping it would put the same user message in the
+   * history *and* in the payload.
+   */
+  function handleRetry(messageId: string) {
+    if (isThinking || !activeConversationId) return;
+    const convId = activeConversationId;
+    const conv = conversations.find((c) => c.id === convId);
+    if (!conv) return;
+
+    const idx = conv.messages.findIndex((m) => m.id === messageId);
+    if (idx < 0) return;
+
+    // Walk back from the failed reply to the prompt that triggered it.
+    let userIdx = idx;
+    while (userIdx >= 0 && conv.messages[userIdx].role !== 'user') userIdx--;
+    if (userIdx < 0) return;
+
+    const text = conv.messages[userIdx].text;
+    if (!text.trim()) return;
+
+    // Everything from the prompt onwards belongs to this attempt; later turns
+    // (possible if the user kept talking after the failure) are left alone.
+    const kept = conv.messages.filter((_, i) => i !== userIdx && i !== idx);
+    conversations = conversations.map((c) =>
+      c.id === convId ? { ...c, messages: kept, updatedAt: Date.now() } : c
+    );
+    isError = false;
+    pushEvent('CHAT', 'retry · re-sending the triggering prompt');
+    void handleSend(text);
+  }
+
+  function handleProviderChange(e: CustomEvent<Provider | UplinkSelection>) {
     // The dispatcher delivers the CustomEvent, not the id (H4). Reading the event
     // object itself made `selectedProvider` an event and `X-Provider` garbage.
-    selectedProvider = normalizeProvider(e.detail);
+    // New shape carries the whole uplink (mode + both selections); the legacy
+    // bare-Provider shape still arrives from older Settings builds.
+    const detail = e.detail;
+    if (detail && typeof detail === 'object') {
+      uplinkMode = normalizeUplinkMode(detail.mode);
+      selectedProvider = normalizeProvider(detail.provider);
+      selectedAgent = normalizeAgent(detail.agent);
+    } else {
+      selectedProvider = normalizeProvider(detail);
+    }
     saveCurrentConversation();
   }
 
+  /** ⌘K / ⌘1 toggle the conversation rail, ⌘, opens Settings (as the hints promise). */
+  $effect(() => {
+    if (!browser) return;
+
+    function onKey(e: KeyboardEvent) {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === 'k' || key === '1') {
+        e.preventDefault();
+        conversationsOpen = !conversationsOpen;
+      } else if (e.key === ',') {
+        e.preventDefault();
+        settingsOpen = true;
+      }
+    }
+
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
   // Initialize on mount
   if (browser) {
+    loadTtsToggle();
     loadConversations();
   }
 </script>
 
 <svelte:head>
-  <title>Glob Interface</title>
-  <meta name="description" content="Neural Electric Globe — AI Interface" />
+  <title>Globe Interface</title>
+  <meta name="description" content="Visor HUD — Neural Globe AI Interface" />
 </svelte:head>
 
 {#if browser}
-  <!-- Conversation Sidebar -->
-  {#if conversations.length > 0}
-    <ConversationSidebar 
-      {conversations}
-      activeId={activeConversationId}
-      onSelect={selectConversation}
-      onNew={createNewConversation}
-      onDelete={deleteConversation}
-    />
-  {/if}
-
-  <!-- Globe centered -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <div class="globe-wrapper" onclick={handleGlobeClick}>
-    <NeuralGlobe {isSpeaking} {isThinking} audioElement={currentAudio ?? undefined} />
-  </div>
-
-  <!-- Chat history: single card on the LEFT side -->
-  {#if activeConversationId && conversations.length > 0}
-    {#each conversations as conv (conv.id)}
-      {#if conv.id === activeConversationId && conv.messages.length > 0}
-        <div class="chat-card">
-          {#each conv.messages as msg}
-            <ChatBubble message={msg} />
-          {/each}
-          {#if isThinking}
-            <div class="thinking">
-              <span class="dot"></span>
-              <span class="dot"></span>
-              <span class="dot"></span>
-              <button class="stop-btn" onclick={stopGeneration} title="Stop generating">
-                ■ Stop
-              </button>
-            </div>
-          {/if}
-        </div>
-      {/if}
-    {/each}
-  {/if}
-
-  <!-- Chat input at the BOTTOM CENTER -->
-  {#if activeConversationId && showInput}
-    <ChatInput 
-      bind:visible={showInput} 
-      on:send={handleSend}
-    />
-  {/if}
-
-  <!-- Device stats at the TOP RIGHT -->
-  <DeviceStats />
-
-  <!-- Settings button at bottom right -->
-  <Settings 
-    initialProvider={selectedProvider} 
-    on:change={handleProviderChange} 
+  <!-- Full-bleed neuron globe: continuous 3D rotation, state-driven animation -->
+  <NeuralGlobe
+    mode={globeState}
+    audioElement={currentAudio ?? undefined}
+    onTelemetry={(t) => (globeTelemetry = t)}
   />
+
+  <!-- Soft radial focus scrim so text reads without ever drawing a box -->
+  <div class="focus-scrim" aria-hidden="true"></div>
+
+  <!-- Transcript: reticle-bounded zone, turns split left/right -->
+  {#if activeConversationId}
+    <TranscriptZone
+      messages={activeMessages}
+      {isThinking}
+      {isStreaming}
+      provider={activeUplinkId}
+      {jumpTick}
+      onStop={stopGeneration}
+      onretry={handleRetry}
+    />
+  {/if}
+
+  <Frame />
+
+  <ThoughtRail
+    steps={thoughtSteps}
+    phase={thoughtPhase}
+    streaming={isStreaming}
+    tokens={thoughtTokens}
+    elapsedMs={thoughtElapsedMs}
+    thinking={thoughtThinking}
+  />
+
+  <OpsLog />
+
+  <footer class="vis-footer">
+    THE GLOBE · VISOR HUD · NEURAL PROJECTION · {activeUplinkId.toUpperCase()}
+  </footer>
+
+  <TopBar
+    hudState={hudState}
+    provider={activeUplinkId}
+    onSettings={() => (settingsOpen = true)}
+  />
+
+  <IconRail
+    count={conversations.length}
+    active={conversationsOpen}
+    onToggleConversations={() => (conversationsOpen = !conversationsOpen)}
+    onNew={() => void createNewConversation()}
+    onFocusComposer={focusComposer}
+    onFocusTranscript={() => jumpTick++}
+  />
+
+  <TelemetryRail
+    telemetry={globeTelemetry}
+    hudState={hudState}
+    provider={settingsReady ? activeUplinkId : ''}
+  />
+
+  {#if activeConversationId}
+    <Composer
+      disabled={isThinking}
+      onsend={(text) => void handleSend(text)}
+      onlisteningchange={(listening) => (isListening = listening)}
+    />
+  {/if}
+
+  <LensOverlay />
+
+  <ConversationsPanel
+    open={conversationsOpen}
+    conversations={panelConversations}
+    activeId={activeConversationId}
+    onclose={() => (conversationsOpen = false)}
+    onselect={(id) => void selectConversation(id)}
+    onnew={() => void createNewConversation()}
+    ondelete={(id) => void deleteConversation(id)}
+  />
+
+  <Settings
+    hideTrigger
+    bind:open={settingsOpen}
+    initialProvider={selectedProvider}
+    on:change={handleProviderChange}
+  />
+
+  <!-- Voice-output toggle: bottom right HUD bracket control — sharp corners,
+       bracket ends, HUD label + white speaker glyph. Waves when live, cross
+       when muted: state survives in shape + word, never colour. -->
+  <button
+    class="tts-toggle"
+    class:muted={!ttsEnabled}
+    onclick={toggleTts}
+    title={ttsEnabled ? 'Mute voice output' : 'Enable voice output'}
+    aria-label={ttsEnabled ? 'Mute voice output' : 'Enable voice output'}
+    aria-pressed={ttsEnabled}
+  >
+    <span class="tts-glyph" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6">
+        <path d="M4 10v4h3l4 3.5v-11L7 10z"></path>
+        {#if ttsEnabled}
+          <path d="M15.5 9.5a4 4 0 0 1 0 5M18 7a7.5 7.5 0 0 1 0 10"></path>
+        {:else}
+          <path d="M15.5 9.5l5 5M20.5 9.5l-5 5"></path>
+        {/if}
+      </svg>
+    </span>
+    <span class="tts-word">{ttsEnabled ? 'VOICE ON' : 'MUTED'}</span>
+  </button>
+
+  <!-- Provider health chip in the main UI (QA-11-03): provider + latency in
+       one place, click re-probes, and an unhealthy uplink shows its reason
+       right on the chip instead of behind Settings. Gated on `settingsReady`
+       so it never probes the pre-hydration default id (a guaranteed 400). -->
+  {#if settingsReady}
+    <div class="health-dock">
+      <ProviderHealth provider={activeUplinkId} mode={uplinkMode} />
+    </div>
+  {/if}
 {/if}
 
 <style>
-  .globe-wrapper {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100vw;
-    height: 100vh;
-    cursor: pointer;
-    z-index: 1;
-  }
+  .focus-scrim {
+   	position: fixed;
+   	inset: 0;
+   	z-index: 2;
+   	pointer-events: none;
+   	background: radial-gradient(
+   		ellipse 60% 55% at 50% 48%,
+   		rgba(5, 11, 26, 0.55) 0%,
+   		rgba(5, 11, 26, 0.28) 55%,
+   		rgba(5, 11, 26, 0) 100%
+   	);
+   }
 
-  .chat-card {
-    position: fixed;
-    top: 50%;
-    left: calc(280px + 40px);
-    transform: translateY(-50%);
-    z-index: 50;
-    width: min(320px, calc(100vw - 360px));
-    max-height: 70vh;
-    overflow-y: auto;
-    background: rgba(10, 15, 30, 0.8);
-    border: 1px solid rgba(68, 136, 255, 0.15);
-    border-radius: 16px;
-    padding: 16px;
-    backdrop-filter: blur(12px);
-    box-shadow: 0 0 30px rgba(68, 136, 255, 0.08);
-  }
+   .vis-footer {
+   	position: fixed;
+   	bottom: 24px;
+   	left: 50%;
+   	transform: translateX(-50%);
+   	z-index: 45;
+   	font-family: var(--font-mono);
+   	font-size: 9px;
+   	letter-spacing: 2.2px;
+   	color: var(--hud-steel);
+   	opacity: 0.75;
+   	white-space: nowrap;
+   	pointer-events: none;
+   }
 
-  .chat-card :global(::-webkit-scrollbar) {
-    width: 4px;
-  }
+   /* Voice-output toggle — bottom right HUD bracket control, same language as
+      the Settings bracket buttons and the composer line: sharp corners,
+      bracket ends, HUD label, plain white glyph. */
+   .tts-toggle {
+   	position: fixed;
+   	bottom: 20px;
+   	right: 20px;
+   	display: flex;
+   	align-items: center;
+   	gap: 8px;
+   	font-family: var(--font-hud);
+   	font-size: 10px;
+   	font-weight: 600;
+   	letter-spacing: 1.6px;
+   	color: var(--hud-cyan);
+   	background: transparent;
+   	border: none;
+   	border-radius: 0;
+   	padding: 8px 14px;
+   	cursor: pointer;
+   	z-index: 90;
+   	transition:
+   		color 0.2s ease,
+   		background 0.2s ease,
+   		box-shadow 0.2s ease,
+   		opacity 0.2s ease;
+   }
+   .tts-toggle::before,
+   .tts-toggle::after {
+   	content: '';
+   	position: absolute;
+   	top: 0;
+   	bottom: 0;
+   	width: 7px;
+   	border: 1px solid currentColor;
+   	opacity: 0.85;
+   	transition: opacity 0.2s ease;
+   }
+   .tts-toggle::before {
+   	left: 0;
+   	border-right: 0;
+   }
+   .tts-toggle::after {
+   	right: 0;
+   	border-left: 0;
+   }
+   .tts-toggle:hover {
+   	background: rgba(125, 249, 255, 0.1);
+   	box-shadow: 0 0 12px rgba(125, 249, 255, 0.3);
+   }
+   .tts-toggle:hover::before,
+   .tts-toggle:hover::after {
+   	opacity: 1;
+   }
+   .tts-toggle.muted {
+   	color: var(--hud-steel);
+   	opacity: 0.8;
+   }
+   .tts-glyph {
+   	display: flex;
+   	color: #ffffff;
+   }
+   .tts-word {
+   	white-space: nowrap;
+   }
 
-  .chat-card :global(::-webkit-scrollbar-track) {
-    background: transparent;
-  }
+   /* Provider health chip — bottom left, mirroring the voice toggle. */
+   .health-dock {
+   	position: fixed;
+   	left: 20px;
+   	bottom: 20px;
+   	z-index: 90;
+   	max-width: calc(100vw - 40px);
+   }
 
-  .chat-card :global(::-webkit-scrollbar-thumb) {
-    background: rgba(68, 136, 255, 0.2);
-    border-radius: 2px;
-  }
-
-  .chat-card :global(::-webkit-scrollbar-thumb:hover) {
-    background: rgba(68, 136, 255, 0.4);
-  }
-
-  .thinking {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 8px 0;
-  }
-
-  .dot {
-    width: 6px;
-    height: 6px;
-    background: rgba(68, 136, 255, 0.5);
-    border-radius: 50%;
-    animation: pulse 1.2s ease-in-out infinite;
-  }
-
-  .dot:nth-child(2) { animation-delay: 0.2s; }
-  .dot:nth-child(3) { animation-delay: 0.4s; }
-
-  .stop-btn {
-    margin-left: auto;
-    padding: 4px 10px;
-    background: rgba(255, 107, 107, 0.15);
-    border: 1px solid rgba(255, 107, 107, 0.5);
-    border-radius: 8px;
-    color: #ff6b6b;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-    cursor: pointer;
-    transition: all 0.2s ease;
-  }
-
-  .stop-btn:hover {
-    background: rgba(255, 107, 107, 0.3);
-    box-shadow: 0 0 12px rgba(255, 107, 107, 0.3);
-  }
-
-  @keyframes pulse {
-    0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
-    40% { opacity: 1; transform: scale(1.2); }
-  }
+   @media (max-width: 720px) {
+   	.vis-footer {
+   		bottom: 14px;
+   		font-size: 8px;
+   		letter-spacing: 1.4px;
+   	}
+   	/* On phones the composer owns the bottom edge — lift the chip into the
+   	   band between the composer and the transcript instead of overlapping. */
+   	.health-dock {
+   		left: 12px;
+   		bottom: 144px;
+   		max-width: calc(100vw - 24px);
+   	}
+   }
 </style>

@@ -1,4 +1,4 @@
-# Glob Interface — Agent Workflow
+# Globe Interface — Agent Workflow
 
 ## The Team
 
