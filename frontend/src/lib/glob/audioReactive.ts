@@ -21,12 +21,37 @@ const ATTACK_RATE = 18;
 /** Slow release rate (/s) — how slowly bands decay back to zero. */
 const RELEASE_RATE = 4;
 
+/**
+ * A smoother within this distance of its target snaps onto it, so a band that
+ * has settled reads an exact 0 instead of an asymptote (an idle globe must be
+ * provably undistorted).
+ */
+const SETTLE_EPSILON = 0.001;
+
+/** Upper bound on retained MediaElementSourceNodes — see start(). */
+const MEDIA_SOURCE_CACHE_MAX = 4;
+
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
 export interface AudioBands {
   bass: number; // 0–250 Hz (widened so voice fundamentals land here)
   mid: number;  // 250 Hz – 2 kHz
   high: number; // 2–8 kHz
+}
+
+/**
+ * Dev/QA observability (P1 verification): live pipeline state, exposed on
+ * `window.__globAudio` in dev builds only. Lets a browser run prove the
+ * analyser is actually connected during real playback — `connected`, `raw`
+ * (pre-smoothing band energy) and `bands` (what reaches the shader uniforms)
+ * sampled over time. Never read by production code.
+ */
+export interface AudioReactiveDebug {
+  raw: AudioBands;
+  bands: AudioBands;
+  connected: boolean;
+  ctxState: string;
+  frames: number;
 }
 
 /** Internal state for exponential smoothing. */
@@ -39,14 +64,21 @@ interface Smoother {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** One exponential-smoothed channel. */
+/** One exponential-smoothed channel. Separate attack/release rates (finding 2). */
 function makeSmoother(initialValue = 0, attackRate = ATTACK_RATE, releaseRate = RELEASE_RATE): Smoother {
   return { value: initialValue, target: initialValue, attackRate, releaseRate };
 }
 
-/** Update a smoother towards its target with frame-rate-independent lerp. */
+/**
+ * Update a smoother towards its target with frame-rate-independent lerp.
+ * Separate attack/release rates so transients pop and audio decays settle.
+ */
 function updateSmoother(s: Smoother, dt: number) {
   const diff = s.target - s.value;
+  if (Math.abs(diff) < SETTLE_EPSILON) {
+    s.value = s.target;
+    return;
+  }
   if (diff > 0) {
     // Attack — faster rise
     s.value += diff * (1 - Math.exp(-s.attackRate * dt));
@@ -66,8 +98,12 @@ function updateSmoother(s: Smoother, dt: number) {
  *
  * Returns an object with:
  * - `start(sourceNode | HTMLMediaElement)` — connect a source, start analysis
- * - `stop()` — disconnect everything, zero all bands
- * - `sample(dt)` → AudioBands — read analyser, compute bands, return smoothed values
+ * - `stop()` — disconnect the graph; band *targets* go to 0 so values decay
+ *   at the release rate instead of snapping
+ * - `sample(dt)` → AudioBands — read analyser, compute bands, smooth them
+ *
+ * `sample()` returns a reused object: read it within the same frame, do not
+ * hold onto it. The same applies to `debug.raw` / `debug.bands`.
  */
 export function createAudioReactive(): {
   start: (source: AudioBufferSourceNode | HTMLMediaElement) => void;
@@ -89,9 +125,30 @@ export function createAudioReactive(): {
   const midSmoother = makeSmoother(0, ATTACK_RATE);
   const highSmoother = makeSmoother(0, ATTACK_RATE);
 
-  /** Compute frequency bands from the analyser's raw data. */
+  // Reused per-frame outputs — the render loop must not allocate.
+  const rawBands: AudioBands = { bass: 0, mid: 0, high: 0 };
+  const outBands: AudioBands = { bass: 0, mid: 0, high: 0 };
+
+  // Dev/QA hook: live pipeline state for browser-side verification.
+  const debug: AudioReactiveDebug = {
+    raw: rawBands,
+    bands: outBands,
+    connected: false,
+    ctxState: 'none',
+    frames: 0
+  };
+  if (import.meta.env.DEV && typeof window !== 'undefined') {
+    (window as Window & { __globAudio?: AudioReactiveDebug }).__globAudio = debug;
+  }
+
+  /** Compute frequency bands from the analyser's raw data. Writes rawBands. */
   function computeBands(sampleRate: number): AudioBands {
-    if (!analyser) return { bass: 0, mid: 0, high: 0 };
+    if (!analyser) {
+      rawBands.bass = 0;
+      rawBands.mid = 0;
+      rawBands.high = 0;
+      return rawBands;
+    }
 
     analyser.getByteFrequencyData(freqData);
 
@@ -123,7 +180,10 @@ export function createAudioReactive(): {
     const highCount = Math.max(0, highEndBin - Math.max(bassEndBin + 1, midEndBin + 1) + 1);
     const highNorm = highCount > 0 ? highEnergy / (highCount * 255) : 0;
 
-    return { bass: bassNorm, mid: midNorm, high: highNorm };
+    rawBands.bass = bassNorm;
+    rawBands.mid = midNorm;
+    rawBands.high = highNorm;
+    return rawBands;
   }
 
   function start(source: AudioBufferSourceNode | HTMLMediaElement): void {
@@ -156,6 +216,13 @@ export function createAudioReactive(): {
         if (!mediaSource) {
           mediaSource = ctx.createMediaElementSource(source);
           mediaSourceCache.set(source, mediaSource);
+          // The cache pins whole media elements (blob URLs included), so bound
+          // it. A session only ever plays the current element, so a handful of
+          // entries is plenty for back-to-back replays of the same element.
+          if (mediaSourceCache.size > MEDIA_SOURCE_CACHE_MAX) {
+            const oldest = mediaSourceCache.keys().next().value;
+            if (oldest !== undefined) mediaSourceCache.delete(oldest);
+          }
         } else {
           // Reconnect cached source to analyser (previous graph may have been disconnected).
           try { mediaSource.disconnect(); } catch {}
@@ -163,11 +230,17 @@ export function createAudioReactive(): {
         mediaSource.connect(analyser);
       }
 
-      analyser.connect(ctx.destination);
+      // Idempotent: a repeated start() must not stack analyser → destination
+      // connections (same hazard class as findings 3 and 4).
+      if (!sourceConnected) {
+        analyser.connect(ctx.destination);
+      }
       sourceConnected = true;
     } catch {
       // Source may already be connected — ignore
     }
+    debug.connected = sourceConnected;
+    debug.ctxState = ctx.state;
   }
 
   function stop(): void {
@@ -175,17 +248,23 @@ export function createAudioReactive(): {
       try { analyser.disconnect(); } catch {}
     }
     sourceConnected = false;
-    // Reset smoothers to zero so bands decay smoothly
-    bassSmoother.value = 0;
+    // Only the targets go to 0 — the values decay at RELEASE_RATE on the next
+    // frames, so bands settle smoothly when audio ends instead of snapping.
+    // (Zeroing .value here would keep finding 2's release rate dead code for
+    // the transition that matters most.)
     bassSmoother.target = 0;
-    midSmoother.value = 0;
     midSmoother.target = 0;
-    highSmoother.value = 0;
     highSmoother.target = 0;
+    debug.connected = false;
   }
 
   function sample(dt: number): AudioBands {
-    if (!analyser || !ctx) return { bass: 0, mid: 0, high: 0 };
+    if (!analyser || !ctx) {
+      outBands.bass = 0;
+      outBands.mid = 0;
+      outBands.high = 0;
+      return outBands;
+    }
 
     const raw = computeBands(ctx.sampleRate);
 
@@ -205,11 +284,15 @@ export function createAudioReactive(): {
     updateSmoother(midSmoother, dt);
     updateSmoother(highSmoother, dt);
 
-    return {
-      bass: bassSmoother.value,
-      mid: midSmoother.value,
-      high: highSmoother.value,
-    };
+    outBands.bass = bassSmoother.value;
+    outBands.mid = midSmoother.value;
+    outBands.high = highSmoother.value;
+
+    debug.connected = sourceConnected;
+    debug.ctxState = ctx.state;
+    debug.frames++;
+
+    return outBands;
   }
 
   return { start, stop, sample };
