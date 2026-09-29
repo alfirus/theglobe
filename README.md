@@ -18,7 +18,7 @@ Shipped:
 
 - **Neural Electric Visual** — 680 nodes (18 clusters × 35 + 50 core), dynamic connections, traveling sparks, UnrealBloom glow
 - **Streaming text chat** — multi-provider (SSE), conversation sidebar with IndexedDB persistence, markdown rendering
-- **Voice input** — Web Speech API, Chrome/Edge only
+- **Voice input** — Web Speech API in Chromium, local Whisper fallback everywhere else
 - **Voice output** — Piper TTS (local model), audio playback in the page
 - **Settings + device stats** — provider configuration UI, cross-platform system stats
 
@@ -39,6 +39,7 @@ Planned (not built): transparent Electron window, mood/color-shifting states bey
 │  frontend/src/routes/api/*            │
 │    POST   /api/chat     SSE streaming │
 │    POST   /api/tts      Piper TTS     │
+│    GET/POST /api/stt    Whisper STT   │
 │    GET/POST /api/settings provider cfg│
 │    GET    /api/stats    device stats  │
 │    POST   /api/health   provider check│
@@ -48,6 +49,7 @@ Planned (not built): transparent Electron window, mood/color-shifting states bey
 │  LLM: LM Studio :1234 (or any         │
 │       OpenAI-compatible provider)     │
 │  TTS: local Piper voice model         │
+│  STT: local Whisper (faster-whisper)  │
 └───────────────────────────────────────┘
 
 Planned, deferred (see ADR-0001):
@@ -73,6 +75,15 @@ npm run dev
 Open [http://localhost:5173](http://localhost:5173)
 
 TTS needs a local Piper voice model; provider settings are entered in the in-app Settings panel.
+
+Voice input uses the browser's Web Speech API where it exists (Chrome/Edge). Everywhere else the mic records a clip and the server transcribes it locally — that needs a Python speech engine:
+
+```bash
+python -m pip install faster-whisper   # preferred (CTranslate2)
+python -m pip install openai-whisper   # fallback (torch)
+```
+
+Optional overrides: `STT_PYTHON` (interpreter), `STT_WORKER` (worker path), `STT_MODEL` (default `base`), `STT_LANGUAGE` (default auto-detect), `STT_TIMEOUT_MS` (default 60000).
 
 ## 🎨 Visual Design
 
@@ -137,7 +148,7 @@ theglobe/
 - **API layer:** SvelteKit server routes — no separate bridge process
 - **LLM:** Any OpenAI-compatible provider (LM Studio at `127.0.0.1:1234` by default)
 - **TTS:** Piper (local voice model)
-- **STT:** Web Speech API (Chrome/Edge)
+- **STT:** Web Speech API (Chrome/Edge) + local Whisper via `POST /api/stt` (Firefox/Safari)
 - **Storage:** IndexedDB (conversations) + a local provider-settings file
 
 ## 📅 Development Phases
@@ -146,7 +157,7 @@ theglobe/
 |-------|--------|-------------|
 | 1. Static Neural Globe | ✅ Shipped | Three.js scene, 680 nodes, connections, idle animation |
 | 2. Text Chat | ✅ Shipped | SvelteKit `/api/chat`, streaming SSE, multi-provider settings, conversation sidebar, multi-turn history + system prompt |
-| 3. Voice Input | ✅ Shipped | Web Speech API microphone input (Chrome/Edge only) |
+| 3. Voice Input | ✅ Shipped | Web Speech API (Chrome/Edge) + local Whisper fallback for other browsers |
 | 4. Voice Output | ✅ Shipped | Piper TTS playback (audio-reactive animation not built) |
 | 5. Polish | 🔲 TODO | Emotion mapping, particles, error states |
 | 6. Electron | 🔲 TODO | Transparent window, desktop pet |
@@ -168,6 +179,7 @@ See [WORKFLOW.md](WORKFLOW.md) for details; review findings live in [REVIEW.md](
 |--------|------|---------|
 | POST | `/api/chat` | Streaming chat completion against the configured provider (SSE) |
 | POST | `/api/tts` | Synthesize speech with Piper, returns audio |
+| GET / POST | `/api/stt` | Speech engine capability probe / transcribe a recorded clip (local Whisper) |
 | GET / POST | `/api/settings` | Read / write provider settings |
 | GET | `/api/stats` | Cross-platform device statistics |
 | POST | `/api/health` | Health check for configured providers |

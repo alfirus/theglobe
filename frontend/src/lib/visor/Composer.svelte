@@ -3,24 +3,50 @@
 	 * The composer is only an underline with bracket ends — no filled box —
 	 * sitting above the footer hints. Carries the mic (voice-first), the
 	 * suggestion chips and the gold send control.
+	 *
+	 * Voice has exactly one pipeline, in both engines:
+	 *
+	 *     final transcript → `input` → submit() → onsend(text)
+	 *
+	 * so what you spoke is always visible in the field before it leaves, and
+	 * a transcript can only be lost by a failure the user is *told* about —
+	 * every drop path sets `voiceError`, which renders in the label row and
+	 * is mirrored to the page's ops log through `onvoiceerror` (P1-7).
+	 *
+	 * Engine choice (capability detection, no UA sniffing):
+	 *   `web-speech` — the browser's SpeechRecognition (Chromium), primary;
+	 *   `whisper`    — MediaRecorder → POST /api/stt (Firefox/Safari, and any
+	 *                  browser without Web Speech) — the fallback;
+	 *   `checking`   — no Web Speech, the /api/stt probe is in flight;
+	 *   `none`       — no usable path; the mic says why when clicked.
 	 */
+	import { onMount } from 'svelte';
+
 	let {
 		disabled = false,
 		onsend = () => {},
 		onlisteningchange = () => {},
-		onfocuschange = () => {}
+		onfocuschange = () => {},
+		onvoiceerror = () => {}
 	}: {
 		disabled?: boolean;
 		onsend?: (text: string) => void;
 		onlisteningchange?: (listening: boolean) => void;
 		onfocuschange?: (focused: boolean) => void;
+		onvoiceerror?: (message: string) => void;
 	} = $props();
+
+	type VoiceMode = 'web-speech' | 'whisper' | 'checking' | 'none';
 
 	let input = $state('');
 	let inputEl = $state<HTMLInputElement | undefined>(undefined);
 	let isListening = $state(false);
+	let isTranscribing = $state(false);
 	let voiceText = $state('');
-	let hasVoiceSupport = $state(false);
+	let voiceError = $state('');
+	let voiceMode = $state<VoiceMode>('checking');
+	let engineLabel = $state('');
+	let sttReason = $state('');
 	let focused = $state(false);
 
 	// Voice recognition — the final transcript leaves through the same `send`
@@ -29,49 +55,51 @@
 		start: () => void;
 		stop: () => void;
 		onresult: ((event: unknown) => void) | null;
-		onerror: (() => void) | null;
-		onend: (() => void) | null;
+		onerror: ((event: unknown) => void) | null;
+		onend: ((event: unknown) => void) | null;
 	} | null = null;
 
-	if (typeof window !== 'undefined') {
-		const SpeechRecognition =
-			(window as unknown as { SpeechRecognition?: unknown; webkitSpeechRecognition?: unknown })
-				.SpeechRecognition ??
-			(window as unknown as { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition;
-
-		if (SpeechRecognition) {
-			hasVoiceSupport = true;
-			const Ctor = SpeechRecognition as new () => Record<string, unknown>;
-			const instance = new Ctor();
-			instance['continuous'] = false;
-			instance['interimResults'] = true;
-			instance['lang'] = 'en-US';
-			instance['onresult'] = (event: {
-				resultIndex: number;
-				results: ArrayLike<ArrayLike<{ transcript: string }> & { isFinal: boolean }>;
-			}) => {
-				let transcript = '';
-				for (let i = event.resultIndex; i < event.results.length; i++) {
-					transcript += event.results[i][0].transcript;
-				}
-				voiceText = transcript;
-				const last = event.results[event.results.length - 1];
-				if (last.isFinal) {
-					const finalText = transcript.trim();
-					if (finalText) onsend(finalText);
-					voiceText = '';
-				}
-			};
-			instance['onerror'] = () => {
-				setListening(false);
-				voiceText = '';
-			};
-			instance['onend'] = () => {
-				setListening(false);
-				voiceText = '';
-			};
-			recognition = instance as unknown as typeof recognition;
+	/** Web Speech failure codes → copy the user actually acts on. */
+	function speechErrorText(code: unknown): string {
+		switch (code) {
+			case 'no-speech':
+				return 'No speech was detected — nothing was sent.';
+			case 'not-allowed':
+			case 'service-not-allowed':
+				return 'Microphone access was blocked by the browser — nothing was sent.';
+			case 'audio-capture':
+				return 'No microphone found — nothing was sent.';
+			case 'network':
+				return 'The speech service is unreachable — check your connection and try again.';
+			case 'language-not-supported':
+				return 'This language is not supported by the speech service.';
+			case 'aborted':
+				return '';
+			default:
+				return `Speech recognition failed${typeof code === 'string' && code ? ` (${code})` : ''} — nothing was sent.`;
 		}
+	}
+
+	function reportError(message: string) {
+		if (!message) return;
+		voiceError = message;
+		onvoiceerror(message);
+	}
+
+	/**
+	 * The single pipeline: transcript → input → send. Empty text is a *visible*
+	 * no-op (an error line), never a silent drop. When the composer is busy
+	 * (`disabled`, a reply is streaming) `submit()` leaves the text in the
+	 * field for the user to send — still not dropped.
+	 */
+	function commitTranscript(text: string) {
+		const value = text.trim();
+		if (!value) {
+			reportError('Nothing was recognised — nothing was sent.');
+			return;
+		}
+		input = value;
+		submit();
 	}
 
 	function setListening(value: boolean) {
@@ -80,21 +108,258 @@
 		onlisteningchange(value);
 	}
 
-	function toggleVoice() {
-		if (!recognition) return;
-		if (isListening) {
-			recognition.stop();
+	function buildRecognition(rawCtor: unknown) {
+		const Ctor = rawCtor as new () => Record<string, unknown>;
+		const instance = new Ctor();
+		instance['continuous'] = false;
+		instance['interimResults'] = true;
+		instance['lang'] = 'en-US';
+		instance['onresult'] = (event: {
+			resultIndex: number;
+			results: ArrayLike<ArrayLike<{ transcript: string }> & { isFinal: boolean }>;
+		}) => {
+			let transcript = '';
+			for (let i = event.resultIndex; i < event.results.length; i++) {
+				transcript += event.results[i][0].transcript;
+			}
+			voiceText = transcript;
+			const last = event.results[event.results.length - 1];
+			if (last.isFinal) {
+				voiceText = '';
+				voiceError = '';
+				commitTranscript(transcript);
+			}
+		};
+		instance['onerror'] = (event: { error?: unknown }) => {
 			setListening(false);
 			voiceText = '';
+			// A recognized failure must surface (P1-7): previously every error
+			// silently cleared the state and the transcript vanished.
+			reportError(speechErrorText(event?.error));
+		};
+		instance['onend'] = () => {
+			setListening(false);
+			voiceText = '';
+		};
+		recognition = instance as unknown as typeof recognition;
+	}
+
+	// ── fallback engine: record → POST /api/stt ──────────────────────────
+	const MAX_RECORD_MS = 60_000;
+	let mediaStream: MediaStream | null = null;
+	let recorder: MediaRecorder | null = null;
+	let chunks: Blob[] = [];
+	let recordTimer: ReturnType<typeof setTimeout> | null = null;
+	let requestingMic = false;
+
+	function releaseMic() {
+		mediaStream?.getTracks().forEach((track) => track.stop());
+		mediaStream = null;
+	}
+
+	function pickMimeType(): string | undefined {
+		const candidates = [
+			'audio/webm;codecs=opus',
+			'audio/webm',
+			'audio/ogg;codecs=opus',
+			'audio/mp4'
+		];
+		for (const type of candidates) {
+			if (MediaRecorder.isTypeSupported(type)) return type;
+		}
+		return undefined;
+	}
+
+	function blobToBase64(blob: Blob): Promise<string> {
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => {
+				const result = String(reader.result);
+				resolve(result.slice(result.indexOf(',') + 1));
+			};
+			reader.onerror = () => reject(reader.error ?? new Error('could not read the recording'));
+			reader.readAsDataURL(blob);
+		});
+	}
+
+	async function startFallback() {
+		if (requestingMic) return;
+		if (typeof navigator.mediaDevices?.getUserMedia !== 'function') {
+			reportError('This browser exposes no microphone API — nothing was sent.');
+			return;
+		}
+		requestingMic = true;
+		try {
+			mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+		} catch {
+			mediaStream = null;
+			reportError('Microphone access was denied — allow the mic and try again. Nothing was sent.');
+			return;
+		} finally {
+			requestingMic = false;
+		}
+
+		if (typeof MediaRecorder === 'undefined') {
+			releaseMic();
+			reportError('This browser cannot record audio — nothing was sent.');
+			return;
+		}
+
+		const mimeType = pickMimeType();
+		try {
+			recorder = mimeType
+				? new MediaRecorder(mediaStream, { mimeType })
+				: new MediaRecorder(mediaStream);
+		} catch {
+			releaseMic();
+			reportError('Audio recording failed to start — nothing was sent.');
+			return;
+		}
+
+		chunks = [];
+		recorder.ondataavailable = (event) => {
+			if (event.data && event.data.size > 0) chunks.push(event.data);
+		};
+		recorder.onerror = () => {
+			releaseMic();
+			setListening(false);
+			reportError('The recording failed — nothing was sent.');
+		};
+		recorder.onstop = () => {
+			const blob = new Blob(chunks, { type: recorder?.mimeType || mimeType || 'audio/webm' });
+			chunks = [];
+			releaseMic();
+			setListening(false);
+			void transcribe(blob);
+		};
+
+		recorder.start();
+		setListening(true);
+		recordTimer = setTimeout(() => void stopFallback(), MAX_RECORD_MS);
+	}
+
+	async function stopFallback() {
+		if (recordTimer) {
+			clearTimeout(recordTimer);
+			recordTimer = null;
+		}
+		if (recorder && recorder.state !== 'inactive') {
+			recorder.stop(); // `onstop` hands the clip to transcribe()
 		} else {
+			releaseMic();
+		}
+	}
+
+	async function transcribe(blob: Blob) {
+		if (blob.size === 0) {
+			reportError('No audio was captured — nothing was sent.');
+			return;
+		}
+		isTranscribing = true;
+		voiceError = '';
+		try {
+			const audio = await blobToBase64(blob);
+			const language = (navigator.language ?? '').split('-')[0];
+			const response = await fetch('/api/stt', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ audio, mimeType: blob.type, language })
+			});
+			const data = (await response.json().catch(() => null)) as {
+				text?: string;
+				error?: string;
+			} | null;
+			if (!response.ok) {
+				throw new Error(data?.error || `Speech engine error (HTTP ${response.status})`);
+			}
+			commitTranscript(data?.text ?? '');
+		} catch (err) {
+			reportError(
+				err instanceof Error && err.message
+					? err.message
+					: 'Speech recognition failed — nothing was sent.'
+			);
+		} finally {
+			isTranscribing = false;
+		}
+	}
+
+	/** No Web Speech: ask the server whether a local engine can take over. */
+	async function probeServer() {
+		try {
+			const response = await fetch('/api/stt', { headers: { Accept: 'application/json' } });
+			const data = (await response.json().catch(() => null)) as {
+				available?: boolean;
+				engine?: string;
+				reason?: string;
+			} | null;
+			if (response.ok && data?.available) {
+				voiceMode = 'whisper';
+				engineLabel = data.engine === 'openai-whisper' ? 'WHISPER · TORCH' : 'WHISPER · LOCAL';
+				sttReason = '';
+			} else {
+				voiceMode = 'none';
+				sttReason = data?.reason || 'No speech engine on the server.';
+			}
+		} catch {
+			voiceMode = 'none';
+			sttReason = 'The Glob server is unreachable, so the local speech engine cannot start.';
+		}
+	}
+
+	onMount(() => {
+		const win = window as unknown as {
+			SpeechRecognition?: unknown;
+			webkitSpeechRecognition?: unknown;
+		};
+		const Ctor = win.SpeechRecognition ?? win.webkitSpeechRecognition;
+		if (Ctor) {
+			voiceMode = 'web-speech';
+			engineLabel = 'WEB SPEECH';
+			buildRecognition(Ctor);
+		} else if (
+			typeof navigator.mediaDevices?.getUserMedia === 'function' &&
+			typeof MediaRecorder !== 'undefined'
+		) {
+			void probeServer();
+		} else {
+			voiceMode = 'none';
+			sttReason = 'This browser offers no speech recognition and no microphone recorder.';
+		}
+	});
+
+	function toggleVoice() {
+		if (isTranscribing) return;
+		if (isListening) {
+			if (voiceMode === 'whisper') {
+				void stopFallback();
+			} else if (recognition) {
+				recognition.stop();
+				setListening(false);
+				voiceText = '';
+			}
+			return;
+		}
+
+		voiceError = '';
+		if (voiceMode === 'web-speech' && recognition) {
 			try {
 				recognition.start();
 				setListening(true);
-			} catch (err) {
-				console.error('Speech recognition error:', err);
-				setListening(false);
+			} catch {
+				reportError('Speech recognition could not start — nothing was sent.');
 			}
+			return;
 		}
+		if (voiceMode === 'whisper') {
+			void startFallback();
+			return;
+		}
+		if (voiceMode === 'checking') {
+			reportError('Still checking the local speech engine — try again in a moment.');
+			return;
+		}
+		reportError(sttReason || 'Voice input is unavailable in this browser.');
 	}
 
 	function submit() {
@@ -134,6 +399,40 @@
 		{ label: 'Summarise the last hour', glyph: 'refresh' },
 		{ label: 'Compare to yesterday', glyph: 'rows' }
 	];
+
+	const micTitle = $derived(
+		isListening
+			? 'Stop listening'
+			: voiceMode === 'web-speech'
+				? 'Voice input (browser speech recognition)'
+				: voiceMode === 'whisper'
+					? 'Voice input (local Whisper on the server)'
+					: voiceMode === 'checking'
+						? 'Voice input — checking the local speech engine…'
+						: `Voice input unavailable — ${sttReason || 'no speech engine'}`
+	);
+
+	const placeholder = $derived(
+		isListening
+			? voiceMode === 'whisper'
+				? 'Recording…'
+				: 'Listening…'
+			: isTranscribing
+				? 'Transcribing…'
+				: 'Message the Globe'
+	);
+
+	const statusText = $derived(
+		isTranscribing
+			? 'TRANSCRIBING…'
+			: isListening
+				? voiceMode === 'whisper'
+					? 'RECORDING…'
+					: voiceText
+						? `“${voiceText}”`
+						: 'LISTENING…'
+				: ''
+	);
 </script>
 
 <div class="composer" class:focused>
@@ -168,35 +467,39 @@
 
 	<div class="label-row">
 		<span class="hud-label">INPUT · VOICE PRIMARY</span>
-		{#if isListening}
-			<span class="listening">{voiceText ? `“${voiceText}”` : 'LISTENING…'}</span>
+		{#if voiceError}
+			<span class="voice-error" role="status" aria-live="polite">{voiceError}</span>
+		{:else if statusText}
+			<span class="listening">{statusText}</span>
+		{:else if engineLabel}
+			<span class="engine" title={micTitle}>{engineLabel}</span>
 		{/if}
 	</div>
 
 	<div class="line">
 		<span class="bracket left" aria-hidden="true"></span>
 
-		{#if hasVoiceSupport}
-			<button
-				class="mic"
-				class:recording={isListening}
-				onclick={toggleVoice}
-				title={isListening ? 'Stop listening' : 'Voice input'}
-				aria-label={isListening ? 'Stop listening' : 'Voice input'}
+		<button
+			class="mic"
+			class:recording={isListening}
+			class:unavailable={voiceMode === 'none'}
+			class:pending={voiceMode === 'checking' || isTranscribing}
+			onclick={toggleVoice}
+			title={micTitle}
+			aria-label={micTitle}
+		>
+			<svg
+				viewBox="0 0 24 24"
+				width="16"
+				height="16"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.6"
 			>
-				<svg
-					viewBox="0 0 24 24"
-					width="16"
-					height="16"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="1.6"
-				>
-					<rect x="9" y="3" width="6" height="11" rx="3"></rect>
-					<path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path>
-				</svg>
-			</button>
-		{/if}
+				<rect x="9" y="3" width="6" height="11" rx="3"></rect>
+				<path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path>
+			</svg>
+		</button>
 
 		<input
 			bind:this={inputEl}
@@ -211,9 +514,12 @@
 				onfocuschange(false);
 			}}
 			type="text"
-			placeholder={isListening ? 'Listening…' : 'Message the Globe'}
+			{placeholder}
 			aria-label="Message the Globe"
 			{disabled}
+			oninput={() => {
+				if (voiceError) voiceError = '';
+			}}
 		/>
 
 		<button
@@ -316,6 +622,29 @@
 		white-space: nowrap;
 	}
 
+	/* Which voice engine this browser is using — the affordance for the
+	 * Web Speech → Whisper handover (P1-7). Idle only; status/error take
+	 * the same slot while they matter. */
+	.engine {
+		font-family: var(--font-mono);
+		font-size: 9.5px;
+		letter-spacing: 0.6px;
+		color: var(--hud-steel);
+		opacity: 0.85;
+		white-space: nowrap;
+	}
+
+	/* Every voice failure lands here (never only in the console). */
+	.voice-error {
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		line-height: 1.35;
+		color: #ff9a9a;
+		max-width: 65%;
+		text-align: right;
+		overflow-wrap: anywhere;
+	}
+
 	/* The line: bracket ends, mic, text, send — an underline, not a box */
 	.line {
 		display: flex;
@@ -370,6 +699,17 @@
 	.mic.recording {
 		border-color: rgba(255, 107, 107, 0.6);
 		animation: mic-pulse 1.5s ease-in-out infinite;
+	}
+	/* Engine still being probed, or a clip being transcribed. */
+	.mic.pending {
+		opacity: 0.6;
+		cursor: progress;
+	}
+	/* Mic stays visible so the user can click it and be told *why* voice is
+	 * unavailable — an invisible control explains nothing. */
+	.mic.unavailable {
+		opacity: 0.45;
+		border-style: dashed;
 	}
 
 	@keyframes mic-pulse {

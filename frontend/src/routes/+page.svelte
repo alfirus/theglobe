@@ -1044,6 +1044,7 @@
 			disabled={isThinking}
 			onsend={(text) => void handleSend(text)}
 			onlisteningchange={(listening) => (isListening = listening)}
+			onvoiceerror={(message) => pushEvent('ERROR', `voice input · ${message.slice(0, 160)}`)}
 		/>
 	{/if}
 
