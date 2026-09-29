@@ -22,6 +22,7 @@
  *   API_SERVER_KEY                        shared secret for /api/* (see assertApiRequest)
  *   PIPER_MODEL                           TTS `piper` engine model path
  *   TTS_TIMEOUT_MS                        synthesis budget for POST /api/tts (default 120000)
+ *   TTS_MAX_CONCURRENT                    parallel TTS engine processes (default 2, clamp 1..4)
  *   GLOB_ALLOWED_ORIGINS                  optional comma-separated extra upstream hosts
  *
  * Integration decisions (Maisarah, EM — integration flags #1/#2, ratified by Alya):
@@ -768,6 +769,31 @@ export function resolveTtsTimeoutMs(): number {
 	const parsed = Number(raw);
 	if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_TTS_TIMEOUT_MS;
 	return Math.min(Math.max(Math.round(parsed), MIN_TTS_TIMEOUT_MS), MAX_TTS_TIMEOUT_MS);
+}
+
+// ── streaming TTS concurrency cap (P1-4) ─────────────────────────────────
+
+/**
+ * Default number of TTS engine processes (piper / say / PowerShell / edge-tts)
+ * that may run at once across **every** TTS route. Two is the sweet spot
+ * measured on the target machine: a sentence costs ~0.7 s wall (0.26 s model
+ * load + ~0.15 s inference), so two slots keep the playback queue fed while
+ * leaving a core free for the app; a second concurrent piper costs more CPU
+ * than it buys latency past that.
+ *
+ * `TTS_MAX_CONCURRENT` clamps to [1, 4] — 1 on a machine where two engines
+ * thrash, 4 only if ops knows better. Read per acquisition, like the timeout.
+ */
+export const DEFAULT_TTS_MAX_CONCURRENT = 2;
+const MIN_TTS_MAX_CONCURRENT = 1;
+const MAX_TTS_MAX_CONCURRENT = 4;
+
+export function resolveTtsMaxConcurrent(): number {
+	const raw = (process.env.TTS_MAX_CONCURRENT ?? '').trim();
+	if (!raw) return DEFAULT_TTS_MAX_CONCURRENT;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_TTS_MAX_CONCURRENT;
+	return Math.min(Math.max(Math.round(parsed), MIN_TTS_MAX_CONCURRENT), MAX_TTS_MAX_CONCURRENT);
 }
 
 // ── shared-secret guard for /api/* (P0-4) ────────────────────────────────

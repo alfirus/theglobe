@@ -29,6 +29,7 @@
   import ThoughtRail, { type ThoughtStep } from '$lib/visor/ThoughtRail.svelte';
   import OpsLog from '$lib/visor/OpsLog.svelte';
   import { pushEvent } from '$lib/events';
+  import { TtsStream } from '$lib/ttsStream';
 
   /**
    * In-memory conversation. Carries `createdAt`/`updatedAt` alongside the
@@ -416,8 +417,35 @@
     }
   }
 
+  /**
+   * Streaming TTS (P1-4): sentences are split and synthesised *while* the reply
+   * is still arriving, then played from an ordered queue — so the first chunk
+   * is audible long before the model finishes writing, and a long reply no
+   * longer stalls for tens of seconds at the end. `speak()` below stays as the
+   * whole-reply fallback for when the streaming route itself is unusable.
+   *
+   * The two timings pushed to the GLOB LOG rail are the numbers to quote:
+   * `first audio frame` = first chunk reached the browser, `first chunk
+   * audible` = it actually started playing (the BLUEPRINT <2 s target).
+   */
+  let ttsError = false;
+  const tts = new TtsStream({
+    onSpeaking: (speaking) => {
+      isSpeaking = speaking;
+    },
+    onFirstFrame: (ms) => pushEvent('TTS', `first audio frame ${Math.round(ms)} ms`),
+    onFirstAudio: (ms) => pushEvent('TTS', `first chunk audible ${Math.round(ms)} ms`),
+    onError: (message) => {
+      ttsError = true;
+      console.error('TTS stream error:', message);
+      pushEvent('ERROR', `tts · ${message.slice(0, 160)}`);
+    }
+  });
+
   /** Stop playback and release the blob URL (L1: every interrupted clip leaked one). */
   function stopSpeaking() {
+    // Both TTS paths: the whole-reply clip below and the streaming queue.
+    tts.stop();
     if (currentAudio) {
       currentAudio.onended = null;
       currentAudio.onerror = null;
@@ -475,6 +503,39 @@
     }
   }
 
+  /**
+   * Close out the streaming TTS session for one reply (P1-4).
+   *
+   * Everything up to here ran in the background: sentences were split off the
+   * chat stream and synthesised while the model was still writing. This flushes
+   * the trailing sentence, waits for the playback queue to drain, and maps the
+   * outcome onto the THOUGHT rail's Speak step.
+   *
+   * Only `unavailable` — the streaming route itself refusing the request —
+   * falls back to the whole-reply `POST /api/tts`, because a failing engine
+   * would fail there identically and a replay after partial playback would
+   * repeat what the user already heard.
+   */
+  async function speakStreamed(reply: string): Promise<void> {
+    const outcome = await tts.finish();
+
+    if (outcome === 'stopped') {
+      setStep('speak', 'done', 'stopped');
+      return;
+    }
+    if (outcome === 'unavailable') {
+      pushEvent('TTS', 'stream route unavailable · whole-reply fallback');
+      await speak(reply);
+      setStep('speak', 'done', 'played');
+      return;
+    }
+    if (outcome === 'silent') {
+      setStep('speak', ttsError ? 'failed' : 'done', ttsError ? 'engine failed' : 'no speech');
+      return;
+    }
+    setStep('speak', 'done', 'played');
+  }
+
   function armChatTimeout(controller: AbortController, uplinkId: string) {
     clearChatTimeout();
     chatTimeout = setTimeout(() => {
@@ -490,8 +551,13 @@
     }
   }
 
-  /** Stop-generation button (P0-3). */
+  /** Stop-generation button (P0-3); P1-4: it also silences mid-speech. */
   function stopGeneration() {
+    // Silence first: aborting the chat request does not by itself stop audio
+    // that is already queued. The same abort reaches POST /api/tts/stream
+    // (request.signal → stream cancel), which kills the engine process that is
+    // still running instead of leaving it to burn its full synthesis budget.
+    tts.stop();
     if (!chatController) return;
     stopRequested = true;
     pushEvent('CHAT', 'stop requested');
@@ -539,6 +605,12 @@
     stopRequested = false;
     timedOut = false;
     stopSpeaking();
+    // Fresh streaming-TTS session for this reply (P1-4). Always begun, even
+    // with voice output off: it owns the abort controller that stop-generation
+    // and a later `stopSpeaking()` rely on, and nothing is requested until a
+    // sentence is actually pushed.
+    ttsError = false;
+    tts.begin();
 
     // THOUGHT rail: fresh run, one step per lifecycle stage.
     thoughtStart = Date.now();
@@ -677,6 +749,9 @@
 
           assistantText += parsed.content;
           thoughtTokens += 1;
+          // P1-4: hand every delta straight to the TTS splitter — complete
+          // sentences start synthesising now, not after the reply ends.
+          if (ttsEnabled) tts.push(parsed.content);
           thoughtElapsedMs = Date.now() - thoughtStart;
           const snapshot = assistantText;
           // First content byte → the skeleton becomes the real bubble.
@@ -715,20 +790,25 @@
         );
       }
 
-      // Speak with the configured TTS engine after streaming completes —
-      // skipped entirely when voice output is toggled off.
+      // Voice output: the streaming session already holds every sentence it
+      // could finish while the reply was arriving — this flushes the tail and
+      // lets the queue drain. Skipped entirely when voice output is off.
       setStep('stream', 'done', `${thoughtTokens} tokens`);
       const speakDetail = !assistantText ? 'empty reply' : ttsEnabled ? 'tts' : 'muted';
       setStep('speak', assistantText && ttsEnabled ? 'active' : 'done', speakDetail);
       thoughtPhase = '';
       pushEvent('STREAM', `done · ${thoughtTokens} frames`);
       if (assistantText && ttsEnabled) {
-        void speak(assistantText).finally(() => setStep('speak', 'done', 'played'));
+        void speakStreamed(assistantText);
       }
 
       await saveCurrentConversation();
       pushEvent('CHAT', `saved · ${thoughtTokens} frames`);
     } catch (err) {
+      // A failed or aborted reply must not keep speaking the part that arrived
+      // (M10 keeps the text; only the audio stops).
+      tts.stop();
+
       // One classification for every failure the send path can produce (P1-2) —
       // `classifyThrownError` itself decides whether this was the client's own
       // Stop/timeout abort. A `null` result means the user pressed Stop: not an
