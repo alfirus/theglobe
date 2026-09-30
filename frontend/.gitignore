@@ -29,3 +29,6 @@ vite.config.ts.timestamp-*
 # Test runners (Vitest junit output + Playwright artifacts)
 test-results/
 playwright-report/
+
+# Packaging output (electron-builder)
+/dist

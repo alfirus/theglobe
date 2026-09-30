@@ -3,6 +3,7 @@
 	"private": true,
 	"version": "0.0.1",
 	"type": "module",
+	"main": "electron/main.js",
 	"engines": {
 		"node": ">=20.19.0"
 	},
@@ -10,6 +11,8 @@
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",
+		"electron": "npm run build && electron .",
+		"dist:mac": "npm run build && electron-builder --mac dmg",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
@@ -32,6 +35,8 @@
 		"eslint": "^10.11.0",
 		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-svelte": "^3.23.0",
+		"electron": "^44.4.5",
+		"electron-builder": "^26.15.3",
 		"fake-indexeddb": "^6.2.5",
 		"globals": "^17.12.0",
 		"prettier": "^3.9.9",
@@ -47,5 +52,43 @@
 		"dompurify": "^3.4.16",
 		"marked": "^18.0.10",
 		"three": "^0.185.1"
+	},
+	"build": {
+		"appId": "com.alfirus.theglobe",
+		"productName": "The Globe",
+		"directories": {
+			"output": "dist",
+			"buildResources": "build-resources"
+		},
+		"files": [
+			"electron/**/*",
+			"package.json"
+		],
+		"extraResources": [
+			{
+				"from": "build",
+				"to": "server"
+			}
+		],
+		"afterPack": "./scripts/afterPack.cjs",
+		"mac": {
+			"category": "public.app-category.productivity",
+			"target": [
+				{
+					"target": "dmg",
+					"arch": ["arm64"]
+				}
+			],
+			"identity": null,
+			"hardenedRuntime": false,
+			"gatekeeperAssess": false,
+			"extendInfo": {
+				"NSMicrophoneUsageDescription": "The Globe uses the microphone for voice input."
+			}
+		},
+		"dmg": {
+			"title": "The Globe",
+			"writeUpdateInfo": false
+		}
 	}
 }
