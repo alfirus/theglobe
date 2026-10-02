@@ -20,9 +20,10 @@ Shipped:
 - **Streaming text chat** — multi-provider (SSE), conversation sidebar with IndexedDB persistence, markdown rendering
 - **Voice input** — Web Speech API in Chromium, local Whisper fallback everywhere else
 - **Voice output** — Piper TTS (local model), audio playback in the page
+- **Audio-reactive animation** — a WebAudio `AnalyserNode` splits the playing voice into bass/mid/high bands and drives node size + warmth, connection brightness, ambient opacity, bloom, and globe scale; the bands decay to exactly 0 when audio stops, so the idle animation is untouched
 - **Settings + device stats** — provider configuration UI, cross-platform system stats
 
-Planned (not built): transparent Electron window, mood/color-shifting states beyond the current thinking/speaking treatments, audio-reactive animation, Hermes skills/memory/tools.
+Planned (not built): transparent Electron window, mood/color-shifting states beyond the current thinking/speaking treatments, Hermes skills/memory/tools.
 
 ## 🏗️ Architecture
 
@@ -97,14 +98,14 @@ The globe is **not a solid sphere**. It looks like electric neurons in a glob fo
 
 ### Color States
 
-The full palette below is the design target. **Implemented today:** two treatments — amber nodes while speaking, a bloom pulse while thinking. The rest (listening, error, mood drift) is not built yet.
+The full palette below is the design target. **Implemented today:** two treatments — amber nodes while speaking and a bloom pulse while thinking — plus an audio-reactive layer on the speaking treatment: the playing voice's bass/mid/high bands drive node warmth, connection brightness, bloom, and globe scale. Still planned: the listening, error, and mood-drift treatments.
 
 | State | Color | Status |
 |-------|-------|--------|
 | Idle | Soft electric blue | ✅ Built |
 | Listening | Blue brightens + white sparks | 🔲 Planned |
 | Thinking | Deep blue → purple | ✅ Built (bloom pulse) |
-| Speaking | Warm amber/gold | ✅ Built (amber nodes) |
+| Speaking | Warm amber/gold | ✅ Built (amber nodes + audio-reactive glow) |
 | Error | Red flash | 🔲 Planned |
 
 ## 📁 Project Structure
@@ -122,9 +123,9 @@ theglobe/
 │       │       ├── stats/          #   GET    device stats
 │       │       └── health/         #   POST   provider health
 │       └── lib/
-│           ├── glob/               # NeuralGlobe.svelte, nodes.ts,
-│           │                       # connections.ts, sparks.ts, core.ts,
-│           │                       # ambient.ts, neuralActivity.ts,
+│           ├── glob/               # NeuralGlobe.svelte, audioReactive.ts,
+│           │                       # nodes.ts, connections.ts, sparks.ts,
+│           │                       # core.ts, ambient.ts, neuralActivity.ts,
 │           │                       # electricArcs.ts, shaders/
 │           ├── ChatInput.svelte    # Compose + voice input
 │           ├── ChatBubble.svelte   # Message rendering (markdown)
@@ -158,7 +159,7 @@ theglobe/
 | 1. Static Neural Globe | ✅ Shipped | Three.js scene, 680 nodes, connections, idle animation |
 | 2. Text Chat | ✅ Shipped | SvelteKit `/api/chat`, streaming SSE, multi-provider settings, conversation sidebar, multi-turn history + system prompt |
 | 3. Voice Input | ✅ Shipped | Web Speech API (Chrome/Edge) + local Whisper fallback for other browsers |
-| 4. Voice Output | ✅ Shipped | Piper TTS playback (audio-reactive animation not built) |
+| 4. Voice Output | ✅ Shipped | Piper TTS playback + audio-reactive animation (bass/mid/high bands drive node glow, connections, bloom, globe scale) |
 | 5. Polish | 🔲 TODO | Emotion mapping, particles, error states |
 | 6. Electron | 🔲 TODO | Transparent window, desktop pet |
 | 7. Advanced | 🔲 TODO | Wake word, multi-language, AI City integration |
