@@ -7,9 +7,10 @@
 > **Read this first — what is spec vs. what is built.** This document is the
 > *design target*. Sections marked **[PLANNED — NOT BUILT]** describe
 > components that do not exist in this repo yet: the WebSocket bridge on
-> port 8742, the Electron shell, the 8-state machine, the audio-reactive
-> pipeline, and the Hermes agent integration (skills, memory, sessions — the
+> port 8742, the Electron shell, the 8-state machine, and the Hermes agent
+> integration (skills, memory, sessions — the
 > chat route sends a stateless message list to an OpenAI-compatible provider).
+> The audio-reactive pipeline is **not** one of them — it is built; see §7.
 > What actually runs today is a SvelteKit app whose
 > `frontend/src/routes/api/*` server routes talk straight to the LLM
 > provider and to Piper TTS — the integration layer the bridge was going to
@@ -37,6 +38,9 @@ Globe Interface is a locally-hosted, visually reactive **neural electric globe**
 > window shown below do not exist. The system as built is: browser →
 > SvelteKit `/api/*` server routes (`frontend/src/routes/api/`) → LLM provider
 > / Piper. See [ADR-0001](docs/adr/0001-use-sveltekit-routes-as-the-bridge.md).
+> The audio analysis lane in VOICE PROCESSING below (`WebAudio AnalyserNode →
+> animation data`) **is** built — see §7 — but TTS is local Piper, not the
+> Hermes TTS API drawn here.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -249,11 +253,23 @@ what is installed.
 
 ### Audio-Reactive Animation Pipeline
 
-> **[PLANNED — NOT BUILT]** Playback today is a plain `Audio` blob with no
-> WebAudio graph and no AnalyserNode, so none of this pipeline exists yet.
+> **✅ SHIPPED (P1-3, PR #10).** Playback builds exactly this graph:
+> `frontend/src/lib/glob/audioReactive.ts` creates the `AudioContext` →
+> `createMediaElementSource()` → `AnalyserNode` (`fftSize: 256`) chain while
+> Piper TTS plays. `+page.svelte:996` hands the live `HTMLAudioElement` to
+> `NeuralGlobe` through the `audioElement` prop, `NeuralGlobe.svelte:196`
+> calls `start(el)` / `stop()`, and `NeuralGlobe.svelte:482-497` writes the
+> smoothed bands into the shader uniforms every frame (node size + warmth,
+> connection brightness, ambient opacity, bloom, globe scale). Every consumer
+> is neutral at 0 and `stop()` zeroes the targets only, so the bands decay to
+> an exact 0 and the idle animation is untouched. Three deviations from the
+> diagram below, as built: bands are **bass 0–250 Hz / mid 250 Hz – 2 kHz**
+> (widened so voice fundamentals land in bass), **warmth is driven by the mid
+> band**, and "particles = high" is implemented as ambient-particle **opacity**
+> rather than a per-frame count rebuild.
 
 ```
-TTS Audio Stream (from bridge)
+TTS audio (Piper /api/tts → HTMLAudioElement)
         │
         ▼
 ┌───────────────────┐
@@ -515,6 +531,8 @@ new BrowserWindow({
 > `frontend/electron/`. The tree that actually exists is in
 > [README.md](README.md) under *Project Structure*. Deferred parts are
 > governed by [ADR-0001](docs/adr/0001-use-sveltekit-routes-as-the-bridge.md).
+> The audio analysis entries below (`AudioAnalyzer.svelte`, `audio.ts`) exist
+> as `lib/glob/audioReactive.ts` instead — see §7.
 
 ```
 theglobe/
@@ -654,10 +672,10 @@ theglobe/
 - ~~Listening state animation~~ (not built — no LISTENING visual yet)
 - Text + voice dual input
 
-### Phase 4: Voice Output (Week 4) — ✅ shipped with Piper TTS (audio-reactive animation not built)
+### Phase 4: Voice Output (Week 4) — ✅ shipped with Piper TTS **and** audio-reactive animation
 - ~~Hermes TTS integration via bridge~~ → Piper via `frontend/src/routes/api/tts/+server.ts`
-- Audio playback (plain `Audio` element; WebAudio analysis not built)
-- ~~Audio-reactive animation driving~~ (not built — playback is a plain `Audio` element)
+- Audio playback — an `HTMLAudioElement` routed through a WebAudio graph (`lib/glob/audioReactive.ts`: `AudioContext` → `AnalyserNode`, fftSize 256)
+- Audio-reactive animation driving — bass/mid/high bands → node size + warmth, connection brightness, ambient opacity, bloom, globe scale (`NeuralGlobe.svelte:482-497`); bands settle to exactly 0 when playback stops
 - Speaking state animation (amber nodes)
 
 ### Phase 5: Polish (Week 5)
