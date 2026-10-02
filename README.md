@@ -98,7 +98,7 @@ The globe is **not a solid sphere**. It looks like electric neurons in a glob fo
 
 ### Color States
 
-The full palette below is the design target. **Implemented today:** two treatments — amber nodes while speaking (with an audio-reactive layer on top: the playing voice's bass/mid/high bands drive node warmth, connection brightness, bloom, and globe scale) and a bloom pulse while thinking. The rest (listening, error, mood drift) is not built yet.
+The full palette below is the design target. **Implemented today:** two treatments — amber nodes while speaking and a bloom pulse while thinking — plus an audio-reactive layer on the speaking treatment: the playing voice's bass/mid/high bands drive node warmth, connection brightness, bloom, and globe scale. Not built yet: the listening, error, and mood-drift treatments.
 
 | State | Color | Status |
 |-------|-------|--------|
