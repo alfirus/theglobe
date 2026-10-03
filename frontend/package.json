@@ -21,7 +21,8 @@
 		"format:check": "prettier --check .",
 		"test": "vitest run",
 		"test:watch": "vitest",
-		"test:smoke": "playwright test"
+		"test:smoke": "playwright test",
+		"guard": "bash ../scripts/guard-no-git-objects.sh"
 	},
 	"devDependencies": {
 		"@eslint/js": "^10.0.1",
