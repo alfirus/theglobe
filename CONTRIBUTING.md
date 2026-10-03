@@ -33,3 +33,21 @@ The implementing kanban card body and the implementation PR must reference the a
 ### Referencing
 
 See `docs/adr/README.md` for full conventions: numbering, naming, superseding rules, and who may accept decisions.
+
+## Guard: never commit `objects/` or `.git` entries (PR #11)
+
+A git object store must never be committed to the tree. CI enforces this on
+every push and PR via the `guard · no objects/ or .git in tree` job, which
+runs `scripts/guard-no-git-objects.sh` against the pushed tree. Check locally
+before pushing:
+
+```sh
+npm run guard --prefix frontend
+```
+
+Optional local pre-commit hook (same check on staged paths):
+
+```sh
+printf '#!/bin/sh\nbash scripts/guard-no-git-objects.sh --staged\n' > .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+```

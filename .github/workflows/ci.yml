@@ -10,7 +10,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: ['**']
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -20,8 +20,22 @@ permissions:
   contents: read
 
 jobs:
+  guard-no-git-objects:
+    name: guard · no objects/ or .git in tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Reject committed git object stores
+        run: bash scripts/guard-no-git-objects.sh HEAD
+
   quality:
     name: check · lint · unit · smoke · build
+    # Full gate only gates main: PRs into main + pushes to main. The guard
+    # above runs on every push/PR; this preserves the previous trigger scope.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
