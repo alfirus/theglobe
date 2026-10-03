@@ -103,7 +103,12 @@ export function buildGraph(nodes: NeuralNode[]): NeuralConnection[] {
 		}
 	}
 
-	addBridgeEdges(nodes, connections, edgeSet);
+	const bridgeUse = addBridgeEdges(nodes, connections, edgeSet);
+
+	// Island stitch (QA follow-up BUG-1): union-find the full graph and join
+	// every non-giant component with one deterministic edge. No-op on the
+	// ~99.8 % of loads that already form a single component.
+	stitchIslandComponents(nodes, connections, edgeSet, bridgeUse);
 
 	return connections;
 }
@@ -123,8 +128,25 @@ export function buildGraph(nodes: NeuralNode[]): NeuralConnection[] {
  * Everything here is deterministic: **no `Math.random()`** — random chords bunch,
  * and they would reshuffle on every reload. Every edge goes through the caller's
  * `edgeSet`, so a layer can never double-book a pair that already exists.
+ *
+ * Two QA follow-up guards (deterministic, still no `Math.random()`):
+ *
+ *   per-node cap — no node carries more than 3 bridge edges. L3 spoke
+ *     convergence used to pile 4–5 spokes on one core node (~8 % of loads);
+ *     the L3 loop now takes the next-nearest core node with headroom (and,
+ *     symmetrically, the next-most-core-facing spoke node when the first
+ *     choice is already saturated by L1/L2 gateway duty). L1/L2 are untouched.
+ *
+ * Returns the per-node bridge-edge count so `buildGraph()` can run the island
+ * stitch without recounting.
  */
 const SHORTCUT_MIN_SEPARATION_DEG = 45;
+
+/**
+ * No node may carry more than this many bridge edges (spec §4). L3 spoke
+ * convergence and the island stitch both route around nodes at the cap.
+ */
+const MAX_BRIDGE_EDGES_PER_NODE = 3;
 
 /** Angular distance in degrees between two vectors. */
 function angleDeg(a: THREE.Vector3, b: THREE.Vector3): number {
@@ -148,7 +170,13 @@ function addBridgeEdges(
 	nodes: NeuralNode[],
 	connections: NeuralConnection[],
 	edgeSet: Set<string>
-): void {
+): Map<number, number> {
+	// Per-node bridge-edge count — feeds the L3 headroom fallback below and is
+	// returned for the island stitch. Counts bridge edges only (kNN edges never
+	// pass through addEdge).
+	const bridgeUse = new Map<number, number>();
+	const useOf = (id: number): number => bridgeUse.get(id) ?? 0;
+
 	// Dense per-cluster buckets, keyed by the cluster ids nodes.ts actually emits.
 	const clusterCount = nodes.reduce((max, n) => Math.max(max, n.cluster + 1), 0);
 	const clusters: NeuralNode[][] = Array.from({ length: clusterCount }, () => []);
@@ -160,7 +188,7 @@ function addBridgeEdges(
 	const clusterIds = clusters
 		.map((members, index) => (members.length > 0 ? index : -1))
 		.filter((index) => index >= 0);
-	if (clusterIds.length === 0 || coreNodes.length === 0) return;
+	if (clusterIds.length === 0 || coreNodes.length === 0) return bridgeUse;
 
 	// centroid[c] = normalized mean basePosition of cluster c's nodes
 	const centroids = new Map<number, THREE.Vector3>();
@@ -176,6 +204,8 @@ function addBridgeEdges(
 		const key = Math.min(source, target) + '-' + Math.max(source, target);
 		if (edgeSet.has(key)) return;
 		edgeSet.add(key);
+		bridgeUse.set(source, useOf(source) + 1);
+		bridgeUse.set(target, useOf(target) + 1);
 		connections.push({
 			source,
 			target,
@@ -251,6 +281,14 @@ function addBridgeEdges(
 
 	// L3 — spoke: each cluster's core-facing node (smallest |basePosition|) to the
 	// nearest core node. One spoke per cluster → an even 18-spoke hub, not a tangle.
+	//
+	// Per-node cap (QA follow-up BUG-2): every cluster picks its nearest core
+	// node independently, so ties converge and one core hub used to take 4–5
+	// spokes (~8 % of loads). When the first choice already carries 3 bridge
+	// edges, fall through to the next-nearest core node with headroom. The
+	// mirror case — the core-facing spoke node itself saturated by L1/L2 gateway
+	// duty — falls through to the next-most-core-facing node the same way.
+	// Both fallbacks keep exactly one spoke per cluster; L1/L2 are untouched.
 	for (const a of clusterIds) {
 		let spoke = clusters[a][0];
 		let spokeLength = spoke.basePosition.length();
@@ -259,6 +297,21 @@ function addBridgeEdges(
 			if (length < spokeLength) {
 				spokeLength = length;
 				spoke = node;
+			}
+		}
+		if (useOf(spoke.id) >= MAX_BRIDGE_EDGES_PER_NODE) {
+			let alt: NeuralNode | null = null;
+			let altLength = Infinity;
+			for (const node of clusters[a]) {
+				if (node.id === spoke.id || useOf(node.id) >= MAX_BRIDGE_EDGES_PER_NODE) continue;
+				const length = node.basePosition.length();
+				if (length < altLength || (length === altLength && alt !== null && node.id < alt.id)) {
+					altLength = length;
+					alt = node;
+				}
+			}
+			if (alt !== null) {
+				spoke = alt;
 			}
 		}
 		let core = coreNodes[0];
@@ -270,7 +323,134 @@ function addBridgeEdges(
 				core = node;
 			}
 		}
+		if (useOf(core.id) >= MAX_BRIDGE_EDGES_PER_NODE) {
+			let alt: NeuralNode | null = null;
+			let altDistance = Infinity;
+			for (const node of coreNodes) {
+				if (node.id === core.id || useOf(node.id) >= MAX_BRIDGE_EDGES_PER_NODE) continue;
+				const distance = node.basePosition.distanceTo(spoke.basePosition);
+				if (
+					distance < altDistance ||
+					(distance === altDistance && alt !== null && node.id < alt.id)
+				) {
+					altDistance = distance;
+					alt = node;
+				}
+			}
+			// In practice unreachable (50 core nodes vs ~45 bridge edges), but a
+			// saturated hub must never silently take a 4th edge: fall back to the
+			// least-loaded core node instead.
+			if (alt === null) {
+				for (const node of coreNodes) {
+					if (node.id === core.id) continue;
+					if (
+						alt === null ||
+						useOf(node.id) < useOf(alt.id) ||
+						(useOf(node.id) === useOf(alt.id) && node.id < alt.id)
+					) {
+						alt = node;
+					}
+				}
+			}
+			if (alt !== null) core = alt;
+		}
 		addEdge(spoke.id, core.id);
+	}
+
+	return bridgeUse;
+}
+
+// ─── Island stitch (QA follow-up BUG-1) ─────────────────────────────────────
+/**
+ * Join every non-giant component to the giant component with one edge.
+ *
+ * Rare loads (~0.2 %) leave a small kNN island with no bridge endpoint inside
+ * it, so the graph ships as 2 components and the island stays dark. For each
+ * such component this adds one edge from its node angularly nearest to any
+ * node in the giant component — the shortest, most local repair possible.
+ *
+ * Deterministic (id-ordered scan, strict minimum, no `Math.random()`), at most
+ * one edge per stray component (≤2 observed, vs the 40–52 new-edge budget),
+ * dedupe-safe (goes through the caller's `edgeSet`), and it prefers endpoints
+ * below `MAX_BRIDGE_EDGES_PER_NODE` so the stitch never breaks the per-node
+ * cap. Runs inside `buildGraph()` so the edge count stays in-budget.
+ */
+function stitchIslandComponents(
+	nodes: NeuralNode[],
+	connections: NeuralConnection[],
+	edgeSet: Set<string>,
+	bridgeUse: Map<number, number>
+): void {
+	const count = nodes.length;
+	const parent = new Array<number>(count);
+	for (let i = 0; i < count; i++) parent[i] = i;
+	const find = (x: number): number => (parent[x] === x ? x : (parent[x] = find(parent[x])));
+	for (const conn of connections) {
+		const a = find(conn.source);
+		const b = find(conn.target);
+		if (a !== b) parent[a] = b;
+	}
+
+	const members = new Map<number, number[]>();
+	for (const node of nodes) {
+		const root = find(node.id);
+		let group = members.get(root);
+		if (group === undefined) {
+			group = [];
+			members.set(root, group);
+		}
+		group.push(node.id);
+	}
+	if (members.size <= 1) return;
+
+	let giant: number[] = [];
+	for (const group of members.values()) {
+		if (group.length > giant.length) giant = group;
+	}
+	giant.sort((a, b) => a - b);
+	const useOf = (id: number): number => bridgeUse.get(id) ?? 0;
+
+	const addEdge = (source: number, target: number): void => {
+		if (source === target) return;
+		const key = Math.min(source, target) + '-' + Math.max(source, target);
+		if (edgeSet.has(key)) return;
+		edgeSet.add(key);
+		bridgeUse.set(source, useOf(source) + 1);
+		bridgeUse.set(target, useOf(target) + 1);
+		connections.push({
+			source,
+			target,
+			activity: 0,
+			baseIntensity: 0.05,
+			age: 0,
+			crossCluster: nodes[source].cluster !== nodes[target].cluster
+		});
+	};
+
+	for (const group of members.values()) {
+		if (group === giant) continue;
+		const island = [...group].sort((a, b) => a - b);
+
+		// Two passes: first only endpoint pairs with headroom under the per-node
+		// cap (keeps BUG-2 fixed), then — practically unreachable — any pair.
+		let bestU = -1;
+		let bestV = -1;
+		for (let pass = 0; pass < 2 && bestU < 0; pass++) {
+			let bestAngle = Infinity;
+			for (const u of island) {
+				if (pass === 0 && useOf(u) >= MAX_BRIDGE_EDGES_PER_NODE) continue;
+				for (const v of giant) {
+					if (pass === 0 && useOf(v) >= MAX_BRIDGE_EDGES_PER_NODE) continue;
+					const angle = angleDeg(nodes[u].basePosition, nodes[v].basePosition);
+					if (angle < bestAngle) {
+						bestAngle = angle;
+						bestU = u;
+						bestV = v;
+					}
+				}
+			}
+		}
+		if (bestU >= 0) addEdge(bestU, bestV);
 	}
 }
 
