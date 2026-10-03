@@ -48,5 +48,15 @@ export default [
 	},
 	{
 		ignores: ['build/', '.svelte-kit/', 'dist/', 'node_modules/']
+	},
+	{
+		// Plain-JS Electron/shell files: typescript-eslint's no-require-imports
+		// and no-unused-expressions assume TS modules; plain `require` and the
+		// ternary-as-statement idiom are correct here.
+		files: ['electron/**/*.js', 'scripts/**/*.cjs', 'scripts/**/*.js'],
+		rules: {
+			'@typescript-eslint/no-require-imports': 'off',
+			'@typescript-eslint/no-unused-expressions': 'off'
+		}
 	}
 ];
