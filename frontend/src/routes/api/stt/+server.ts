@@ -41,6 +41,52 @@ const PROBE_TTL_MS = 60_000;
 
 const DEFAULT_MODEL = 'base';
 
+/**
+ * Pre-parse bound on the JSON body: base64 inflates ~4/3 over
+ * MAX_AUDIO_BYTES, plus a little JSON wrapper — reject anything bigger before
+ * `JSON.parse` ever sees it (card t_c0ae5752). The body is base64 ASCII so
+ * `raw.length` equals its byte size.
+ */
+const MAX_BODY_BYTES = 6 * 1024 * 1024;
+
+/**
+ * Stable client-safe copy per error code. Server-local filesystem paths
+ * (interpreter locations, worker search dirs, mkdtemp clip paths, stderr
+ * tails) must never reach the browser — the full detail goes to the server
+ * log via logEvent at each site instead.
+ */
+const CLIENT_COPY: Record<string, string> = {
+	worker_not_found: 'Speech engine files are missing on the server.',
+	engine_unavailable: 'No speech engine is installed on the server.',
+	python_not_found: 'No speech engine is available on the server.',
+	spawn_timeout: 'The speech engine took too long to start.',
+	spawn_failed: 'The speech engine could not be started.',
+	worker_stopped: 'The speech engine stopped unexpectedly.',
+	model_load_failed: 'The speech engine could not load its model.',
+	transcribe_failed: 'Transcription failed — nothing was sent.',
+	transcribe_timeout: 'Transcription took too long — nothing was sent.'
+};
+
+/** Strip server-local absolute paths (Windows + POSIX) from worker detail. */
+function stripPaths(text: string): string {
+	return text
+		.replace(/[A-Za-z]:[\\/][^\s"'`,;]*/g, '')
+		.replace(/(^|[\s"'`([{|])\/(?:[^\s"'`,;()[\]{}]+\/)*[^\s"'`,;()[\]{}]*/g, '$1')
+		.replace(/\s{2,}/g, ' ')
+		.trim();
+}
+
+/**
+ * Worker-supplied detail (e.g. `transcribe_failed`) may carry useful engine
+ * info alongside a temp path — keep the info, drop the paths. Falls back to
+ * the stable copy when nothing quotable survives.
+ */
+function clientDetail(code: string, detail: string, maxLen = 200): string {
+	const cleaned = stripPaths(detail).slice(0, maxLen).trim();
+	if (!cleaned || /^[(,;)\s]*$/.test(cleaned)) return CLIENT_COPY[code] ?? 'Speech engine error.';
+	return cleaned;
+}
+
 /** `audio/webm;codecs=opus` → `webm`. */
 function extensionFor(mimeType: string, bytes: Buffer): string | null {
 	const clean = mimeType.split(';')[0].trim().toLowerCase();
@@ -144,7 +190,13 @@ function workerScript(): { path: string | null; searched: string[] } {
 
 // ── capability probe (GET) ───────────────────────────────────────────────
 
-type Probe = { available: boolean; engine?: string; model: string; reason?: string };
+type Probe = {
+	available: boolean;
+	engine?: string;
+	model: string;
+	reason?: string;
+	code?: string;
+};
 let probeCache: { at: number; value: Probe } | null = null;
 
 /**
@@ -189,15 +241,19 @@ async function capability(): Promise<Probe> {
 	const { path, searched } = workerScript();
 	let reason = '';
 	if (!path) {
-		reason = `stt_worker.py not found (searched ${searched.join(', ')}) — set STT_WORKER`;
+		// Stable copy to the client; the searched dirs stay in the server log.
+		reason = CLIENT_COPY.worker_not_found;
+		logEvent('stt', 'probe_no_worker', { searched: searched.join(' ; ').slice(0, 500) }, 'warn');
 	}
 
 	let value: Probe;
 	if (reason) {
-		value = { available: false, model, reason };
+		value = { available: false, model, reason, code: 'worker_not_found' };
 	} else {
 		let last = 'no Python interpreter candidate resolved';
+		let tried = 0;
 		for (const python of pythonCandidates()) {
+			tried += 1;
 			const engine = await probeInterpreter(python);
 			if (engine) {
 				value = { available: true, engine, model };
@@ -206,10 +262,13 @@ async function capability(): Promise<Probe> {
 			}
 			last = `no speech engine in ${python}`;
 		}
+		// Stable copy to the client; per-interpreter detail stays server-side.
+		logEvent('stt', 'probe_no_engine', { tried, detail: last.slice(0, 500) }, 'warn');
 		value = {
 			available: false,
 			model,
-			reason: `${last} — install one with \`python -m pip install faster-whisper\` or set STT_PYTHON`
+			reason: CLIENT_COPY.engine_unavailable,
+			code: 'engine_unavailable'
 		};
 	}
 	probeCache = { at: Date.now(), value };
@@ -411,10 +470,16 @@ async function startWorker(): Promise<WorkerHandle> {
 			lastSpawnError = { code, error: message };
 		}
 	}
-	const error = Object.assign(new Error(`No usable STT interpreter — ${reasons.join(' ; ')}`), {
+	// Stable copy to the client; the per-interpreter reasons stay server-side.
+	const error = Object.assign(new Error(CLIENT_COPY.engine_unavailable), {
 		code: 'engine_unavailable'
 	});
-	logEvent('stt', 'worker_start_failed', { candidates: reasons.length }, 'error');
+	logEvent(
+		'stt',
+		'worker_start_failed',
+		{ candidates: reasons.length, detail: reasons.join(' ; ').slice(0, 1000) },
+		'error'
+	);
 	throw error;
 }
 
@@ -493,7 +558,13 @@ export const GET: RequestHandler = async ({ request }) => {
 		});
 	}
 	const payload =
-		lastSpawnError && !probe.available ? { ...probe, lastError: lastSpawnError.error } : probe;
+		lastSpawnError && !probe.available
+			? {
+					...probe,
+					lastError: CLIENT_COPY[lastSpawnError.code] ?? 'Speech engine error.',
+					lastErrorCode: lastSpawnError.code
+				}
+			: probe;
 	return json(payload, { status: probe.available ? 200 : 503 });
 };
 
@@ -502,8 +573,32 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (denied) return denied;
 
 	let body: { audio?: unknown; mimeType?: unknown; language?: unknown };
+	// Pre-parse bound: reject oversized bodies before JSON.parse ever sees
+	// them (the 4 MB audio bound below applies post-base64-decode).
+	const contentLength = Number.parseInt(request.headers.get('content-length') ?? '', 10);
+	if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+		logEvent('stt', 'request_body_too_large', { bytes: contentLength }, 'warn');
+		return json(
+			{ error: `Request body exceeds ${MAX_BODY_BYTES / (1024 * 1024)} MB`, code: 'too_large' },
+			{ status: 413 }
+		);
+	}
+	let raw: string;
 	try {
-		body = (await request.json()) as typeof body;
+		raw = await request.text();
+	} catch (err) {
+		logEvent('stt', 'request_body_invalid', errorFields(err), 'warn');
+		return json({ error: 'Invalid JSON body', code: 'invalid_request' }, { status: 400 });
+	}
+	if (raw.length > MAX_BODY_BYTES) {
+		logEvent('stt', 'request_body_too_large', { chars: raw.length }, 'warn');
+		return json(
+			{ error: `Request body exceeds ${MAX_BODY_BYTES / (1024 * 1024)} MB`, code: 'too_large' },
+			{ status: 413 }
+		);
+	}
+	try {
+		body = JSON.parse(raw) as typeof body;
 	} catch (err) {
 		logEvent('stt', 'request_body_invalid', errorFields(err), 'warn');
 		return json({ error: 'Invalid JSON body', code: 'invalid_request' }, { status: 400 });
@@ -567,8 +662,21 @@ export const POST: RequestHandler = async ({ request }) => {
 					  code === 'worker_stopped'
 					? 503
 					: 500;
-		logEvent('stt', 'transcribe_failed', { code, status, err: message.slice(0, 300) }, 'error');
-		return json({ error: message, code }, { status });
+		logEvent(
+			'stt',
+			'transcribe_failed',
+			{ code, status, clip: file, err: message.slice(0, 500) },
+			'error'
+		);
+		// Stable copy to the client: worker detail can embed the mkdtemp clip
+		// path or interpreter locations; the full text stays in the server log.
+		const clientMessage =
+			code === 'transcribe_timeout'
+				? message // `transcription exceeded Ns` — no paths by construction
+				: code === 'transcribe_failed'
+					? clientDetail(code, message)
+					: (CLIENT_COPY[code] ?? 'Speech engine error.');
+		return json({ error: clientMessage, code }, { status });
 	} finally {
 		try {
 			unlinkSync(file);
