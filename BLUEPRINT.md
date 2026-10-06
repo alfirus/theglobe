@@ -166,10 +166,12 @@ The entire neural network shifts together — connections, sparks, and core all 
 
 ## 5. State Machine
 
-> **[PLANNED — NOT BUILT]** The code has two booleans (`isSpeaking`,
-> `isThinking`) in `NeuralGlobe.svelte` and two visual treatments — not this
-> 8-state machine, and no LISTENING or ERROR state (so the "Error red flash"
-> row below cannot trigger as written). Kept as the design target.
+> **[PART SHIPPED — 5-state wiring / PLANNED — full 8-state machine]** The state flags
+> (`isThinking`, `isStreaming`, `isSpeaking`, `isListening`, `isError`) live in
+> `+page.svelte` and derive a `mode: GlobeState` prop consumed by
+> `NeuralGlobe.svelte`'s `STATE_CFG` — not this 8-state machine. The full
+> machine below (with its LISTENING/ERROR-driven treatments) is kept as the
+> design target.
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -401,10 +403,14 @@ Bridge Server (port 8742)
 
 ## 10. Desktop: Transparent Window
 
-> **[PLANNED — NOT BUILT]** No `frontend/electron/` directory exists; the app
-> runs in a browser tab today. The renderer is also created with
-> `alpha: false` and an opaque black scene background, which a transparent
-> window would need to change.
+> **[PART SHIPPED — opaque shell / PLANNED — transparency]**
+> `frontend/electron/` ships an Electron shell (`main.js`: spawns the
+> adapter-node server on a free loopback port, splash + single-instance lock,
+> electron-builder packaging) — but its window is opaque
+> (`backgroundColor: '#000000'`, no `transparent`/`frame` options), so the
+> transparent floating window itself stays planned. The renderer is also
+> created with `alpha: false` and an opaque black scene background, which a
+> transparent window would need to change.
 
 ### Electron Configuration
 
@@ -506,7 +512,7 @@ new BrowserWindow({
 
 | Layer | Technology | Why |
 |-------|-----------|-----|
-| **Window** | Electron | **[PLANNED — NOT BUILT]** the app runs in a browser tab today |
+| **Window** | Electron | **PART SHIPPED** — opaque shell ships (`frontend/electron/main.js`); transparent floating window still planned, browser tab is today's default |
 | **Frontend Framework** | SvelteKit + Vite | Fast dev, small bundle, great reactivity |
 | **3D Engine** | Three.js + custom GLSL shaders | Mature, well-documented, GPU-accelerated |
 | **Post-processing** | UnrealBloomPass | Electric glow effect |
@@ -527,8 +533,9 @@ new BrowserWindow({
 > Most entries below do not exist yet: no `NodeCloud.svelte` / other
 > per-element `.svelte` files (the globe is `.ts` modules under `lib/glob/`),
 > no `lib/voice/`, no `lib/ws/`, no `stores/`, no `bridge/`, no root
-> `shaders/`, no `config/`, no `scripts/`, no `ARCHITECTURE.md`, no
-> `frontend/electron/`. The tree that actually exists is in
+> `shaders/`, no `config/`, no `scripts/`, no `ARCHITECTURE.md`.
+> (`frontend/electron/` DOES exist — the opaque shell shipped as `main.js`,
+> without the `preload.ts` this old tree sketches.) The tree that actually
 > [README.md](README.md) under *Project Structure*. Deferred parts are
 > governed by [ADR-0001](docs/adr/0001-use-sveltekit-routes-as-the-bridge.md).
 > The audio analysis entries below (`AudioAnalyzer.svelte`, `audio.ts`) exist
@@ -686,7 +693,8 @@ theglobe/
 - Session persistence
 - Performance optimization
 
-### Phase 6: Electron (Week 6)
+### Phase 6: Electron (Week 6) — PART SHIPPED (opaque shell; transparency + pet behaviours still planned)
+- ✅ Opaque shell shipped (`frontend/electron/main.js`, smoke scripts, electron-builder packaging)
 - Wrap in transparent window
 - Desktop pet features (drag, resize, tray)
 - Click-through mode
