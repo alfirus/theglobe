@@ -8,7 +8,7 @@ Not a solid orb. A network of glowing neuron nodes, electric connections, and tr
 
 The Globe Interface is a locally-hosted, visually reactive **neural electric globe** that acts as a physical embodiment of an AI agent.
 
-Today it runs as a **SvelteKit app in your browser** — no desktop shell yet. The floating transparent window (Electron) is planned, not built; see [ADR-0001](docs/adr/0001-use-sveltekit-routes-as-the-bridge.md) and the phase table below.
+Today it runs as a **SvelteKit app in your browser**, and ships an **Electron shell** (`frontend/electron/main.js`) that packages it as a desktop app. The shell opens an opaque 1280×860 window today — the floating transparent window is planned, not built; see [ADR-0001](docs/adr/0001-use-sveltekit-routes-as-the-bridge.md) and the phase table below.
 
 The LLM calls come from the app's own server routes to an OpenAI-compatible provider (LM Studio at `127.0.0.1:1234` by default). The deeper [Hermes Agent](https://hermes-agent.nousresearch.com/) integration — skills, memory, sessions, tools — is the target architecture: the chat route sends the conversation's history and the configured system prompt (when set) with each request, but sessions, memory, and tool use do not reach the model yet.
 
@@ -57,7 +57,7 @@ Planned, deferred (see ADR-0001):
   • WebSocket bridge :8742  • Electron transparent window
 ```
 
-There is no bridge process and no Electron shell in this repo — the SvelteKit `/api/*` routes *are* the bridge.
+There is no bridge process in this repo — the SvelteKit `/api/*` routes *are* the bridge. The Electron shell (`frontend/electron/main.js`: spawns the adapter-node server on a free loopback port, splash + single-instance lock, electron-builder packaging) ships the app as a desktop app, but its window is opaque — transparency, click-through, tray, and desktop-pet behaviours are still planned.
 
 ## 🚀 Quick Start
 
@@ -113,6 +113,8 @@ The full palette below is the design target. **Implemented today:** two treatmen
 ```
 theglobe/
 ├── frontend/                # SvelteKit + Three.js app
+│   ├── electron/
+│   │   └── main.js              # Electron shell: server child + window
 │   └── src/
 │       ├── routes/
 │       │   ├── +page.svelte        # Main page: chat UI, globe, playback
@@ -143,7 +145,7 @@ theglobe/
 
 ## 🛠️ Tech Stack
 
-- **Frontend:** SvelteKit + Vite (browser tab today; Electron window planned)
+- **Frontend:** SvelteKit + Vite (browser tab by default; opaque Electron shell ships, transparent window planned)
 - **3D:** Three.js + GLSL shaders
 - **Post-processing:** UnrealBloomPass
 - **API layer:** SvelteKit server routes — no separate bridge process
