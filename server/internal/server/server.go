@@ -17,9 +17,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/alfirus/theglobe/server/internal/config"
+	"github.com/alfirus/theglobe/server/internal/files"
 )
 
 // Handler is the globe-server HTTP handler: logging middleware outside the
@@ -37,7 +39,13 @@ func NewHandler(out io.Writer) *Handler {
 	}
 	h := &Handler{mux: http.NewServeMux(), out: out}
 	h.mux.HandleFunc("/healthz", h.handleHealthz)
-	// Phase 1 has no /api/* implementations. Every /api/* path still passes
+	// Phase 1b: the Desktop-file bridge. Exact path serves the listing;
+	// the subtree serves one file per name. Both run the shared guard
+	// first (files.HandleList/HandleFile call AssertAPIRequest), so auth
+	// is identical to every other /api/* route.
+	h.mux.HandleFunc("/api/files", files.HandleList)
+	h.mux.HandleFunc("/api/files/", h.handleFile)
+	// Phase 1 has no other /api/* implementations. Every remaining /api/*
 	// the guard (rule parity from day one) and then gets a JSON 404 — Phase 2
 	// replaces this subtree route by route.
 	h.mux.HandleFunc("/api/", h.handleAPIFallback)
@@ -56,6 +64,17 @@ func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"service": "globe-server", "status": "ok"})
+}
+
+// handleFile serves GET /api/files/:name. A bare trailing "/api/files/"
+// (empty name) is treated as the listing for convenience.
+func (h *Handler) handleFile(w http.ResponseWriter, r *http.Request) {
+	name, _ := strings.CutPrefix(r.URL.Path, "/api/files/")
+	if name == "" {
+		files.HandleList(w, r)
+		return
+	}
+	files.HandleFile(w, r, name)
 }
 
 func (h *Handler) handleAPIFallback(w http.ResponseWriter, r *http.Request) {

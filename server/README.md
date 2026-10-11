@@ -22,7 +22,9 @@ yet (Phase 2, Lisa's card), so there is zero risk to the running TS system.
   `API_SERVER_KEY` compare via `Authorization: Bearer` / `X-API-Key`,
   loopback-Host rule against DNS rebinding).
 - `internal/server` — mux: `GET /healthz` liveness (`{"service":
-  "globe-server","status":"ok"}`); every `/api/*` path passes the guard then
+  "globe-server","status":"ok"}`); the Phase 1b Desktop-file bridge
+  (`GET /api/files` listing + `GET /api/files/:name` file bytes, in
+  `internal/files`); every remaining `/api/*` path passes the guard then
   gets a JSON 404 until Phase 2 ports the routes. Request logs carry routing
   metadata only (method, path, status, bytes, ms) — never headers, query
   strings or bodies (C4 rule, enforced by construction + test).
@@ -60,6 +62,26 @@ The Go tests in `internal/config` mirror `frontend/tests/config.test.ts`
 `STT_*` knobs (`STT_PYTHON`, `STT_WORKER`, `STT_MODEL`, `STT_LANGUAGE`,
 `STT_TIMEOUT_MS`) are route-level — they arrive with the `/api/stt` port in
 Phase 2, not here.
+
+## Desktop-file bridge (Phase 1b)
+
+Read-only viewer for the owner's Desktop, surfaced in the visor as the
+Files panel (same-origin `/api/files`):
+
+- `GET /api/files` → `[{name, size, modified, contentType}]` — only
+  servable files are listed (allow-listed extension, within the size cap).
+- `GET /api/files/:name` → file bytes with `Content-Disposition: inline`
+  (viewable types), `X-Content-Type-Options: nosniff`. `.svg` is served as
+  `text/plain`, never `image/svg+xml` — inline SVG executes script, and the
+  bridge previews files; it must not become a stored-XSS vector.
+- Both routes run `AssertAPIRequest` first: tailnet devices authenticate
+  with `API_SERVER_KEY`; there are no anonymous off-loopback reads. Names
+  are bare file names only — traversal, separators, absolute paths, drive
+  letters, and symlinks escaping the root are rejected.
+
+`GLOBE_FILES_ROOT` (default: current user's Desktop) ·
+`GLOBE_FILES_EXT` (default: `pdf,png,jpg,jpeg,gif,webp,svg,txt,md,csv`) ·
+`GLOBE_FILES_MAX_BYTES` (default: 10 MiB, fails closed on garbage).
 
 ## ADR
 

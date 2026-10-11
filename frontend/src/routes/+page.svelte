@@ -26,6 +26,7 @@
 	import TranscriptZone from '$lib/visor/TranscriptZone.svelte';
 	import Composer from '$lib/visor/Composer.svelte';
 	import ConversationsPanel from '$lib/visor/ConversationsPanel.svelte';
+	import FilesPanel from '$lib/visor/FilesPanel.svelte';
 	import ThoughtRail, { type ThoughtStep } from '$lib/visor/ThoughtRail.svelte';
 	import OpsLog from '$lib/visor/OpsLog.svelte';
 	import { pushEvent } from '$lib/events';
@@ -143,6 +144,7 @@
 	let settingsReady = $state(false); // server settings resolved at least once
 	let settingsOpen = $state(false);
 	let conversationsOpen = $state(false);
+	let filesOpen = $state(false);
 	let jumpTick = $state(0);
 	let globeTelemetry = $state<GlobeTelemetry | null>(null);
 
@@ -1035,7 +1037,9 @@
 	<IconRail
 		count={conversations.length}
 		active={conversationsOpen}
+		filesActive={filesOpen}
 		onToggleConversations={() => (conversationsOpen = !conversationsOpen)}
+		onToggleFiles={() => (filesOpen = !filesOpen)}
 		onNew={() => void createNewConversation()}
 		onFocusComposer={focusComposer}
 		onFocusTranscript={() => jumpTick++}
@@ -1067,6 +1071,8 @@
 		onnew={() => void createNewConversation()}
 		ondelete={(id) => void deleteConversation(id)}
 	/>
+
+	<FilesPanel open={filesOpen} onclose={() => (filesOpen = false)} />
 
 	<Settings
 		hideTrigger
