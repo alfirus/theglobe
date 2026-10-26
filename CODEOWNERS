@@ -1,0 +1,4 @@
+# Advisory only (P2-1): single-owner repo, 0 required reviewers is accepted
+# risk with enforce_admins on. This file documents the owner without changing
+# branch protection — enabling a required reviewer stays the owner's call.
+* @alfirus

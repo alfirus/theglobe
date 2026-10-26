@@ -132,6 +132,16 @@ describe('POST /api/stt error copy', () => {
 		expect(data.code).toBe('too_large');
 	});
 
+	it('rejects non-base64 audio with 400 before any engine contact (P3-1)', async () => {
+		for (const audio of ['!!!not-base64!!!', 'abc', 'a b c d', '====']) {
+			const response = await call(POST, postJson('/api/stt', { audio, mimeType: 'audio/wav' }));
+			expect(response.status).toBe(400);
+			const data = (await response.json()) as { error: string; code: string };
+			expect(data.code).toBe('invalid_request');
+			expect(data.error).toContain('base64');
+		}
+	});
+
 	it('maps spawn failure to stable copy without interpreter paths', async () => {
 		process.env.STT_WORKER = WORKER_SCRIPT;
 		state.mode = 'spawn-fails';

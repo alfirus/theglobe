@@ -9,6 +9,10 @@
 //   - Resolve rejects traversal, path separators, absolute paths, drive
 //     letters / ADS streams, Windows-mangled trailing dots/spaces, and any
 //     symlink/reparse point whose resolved target escapes GLOBE_FILES_ROOT.
+//     Serving goes through OpenResolved: the opened fd is SameFile-verified
+//     against the vetted resolution, so a symlink swap between resolution
+//     and open (TOCTOU, P2-5) fails closed with 404 instead of serving an
+//     unlisted file.
 //   - Only allow-listed extensions (GLOBE_FILES_EXT) are listed or served,
 //     and only up to GLOBE_FILES_MAX_BYTES per file.
 //   - .svg is served as text/plain (never image/svg+xml): inline SVG can
@@ -143,55 +147,90 @@ func ContentTypeFor(name string) (string, bool) {
 // Callers map ErrNotFound to 404 and every other error to 400/403 via
 // resolveStatus below.
 func Resolve(root, name string) (string, error) {
+	resolved, _, err := resolve(root, name)
+	return resolved, err
+}
+
+// resolveOpenHook runs between path resolution and open inside OpenResolved.
+// Nil in production; tests set it to simulate a symlink swap in the window.
+var resolveOpenHook func()
+
+// OpenResolved resolves name and opens the result as a single verified step
+// (P2-5 TOCTOU hardening): the served bytes come from the opened fd, and the
+// fd is verified to be the same file Resolve just vetted (os.SameFile) and a
+// regular file. A symlink swap between resolution and open — or a swap that
+// turns the target into a non-regular file — fails closed with ErrNotFound
+// instead of serving an unlisted file.
+func OpenResolved(root, name string) (*os.File, os.FileInfo, error) {
+	resolved, info, err := resolve(root, name)
+	if err != nil {
+		return nil, nil, err
+	}
+	if resolveOpenHook != nil {
+		resolveOpenHook()
+	}
+	f, err := os.Open(resolved)
+	if err != nil {
+		return nil, nil, ErrNotFound
+	}
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() || !os.SameFile(info, fi) {
+		_ = f.Close()
+		return nil, nil, ErrNotFound
+	}
+	return f, fi, nil
+}
+
+func resolve(root, name string) (string, os.FileInfo, error) {
 	if strings.TrimSpace(name) == "" {
-		return "", fmt.Errorf("empty file name")
+		return "", nil, fmt.Errorf("empty file name")
 	}
 	if strings.ContainsAny(name, `/\`) {
-		return "", fmt.Errorf("file name must not contain path separators")
+		return "", nil, fmt.Errorf("file name must not contain path separators")
 	}
 	if filepath.IsAbs(name) || strings.Contains(name, ":") {
-		return "", fmt.Errorf("file name must be a bare file name")
+		return "", nil, fmt.Errorf("file name must be a bare file name")
 	}
 	if name == "." || name == ".." {
-		return "", fmt.Errorf("file name must be a bare file name")
+		return "", nil, fmt.Errorf("file name must be a bare file name")
 	}
 	if strings.ContainsAny(name, "\r\n") {
-		return "", fmt.Errorf("file name contains control characters")
+		return "", nil, fmt.Errorf("file name contains control characters")
 	}
 	if strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") {
 		// Windows strips trailing dots/spaces on write, so "report." and
 		// "report" would name the same file — reject the ambiguous form.
-		return "", fmt.Errorf("file name must not end with a dot or space")
+		return "", nil, fmt.Errorf("file name must not end with a dot or space")
 	}
 	if filepath.Clean(name) != name {
-		return "", fmt.Errorf("file name is not canonical")
+		return "", nil, fmt.Errorf("file name is not canonical")
 	}
 
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(absRoot)
 	if err != nil {
-		return "", ErrNotFound
+		return "", nil, ErrNotFound
 	}
 	candidate := filepath.Join(absRoot, name)
 	resolved, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
-		return "", ErrNotFound
+		return "", nil, ErrNotFound
 	}
 	rel, err := filepath.Rel(resolvedRoot, resolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("file escapes the bridge root: %w", errEscape)
+		return "", nil, fmt.Errorf("file escapes the bridge root: %w", errEscape)
 	}
 	st, err := os.Stat(resolved)
 	if err != nil {
-		return "", ErrNotFound
+		return "", nil, ErrNotFound
 	}
 	if !st.Mode().IsRegular() {
-		return "", ErrNotFound
+		return "", nil, ErrNotFound
 	}
-	return resolved, nil
+	return resolved, st, nil
 }
 
 // ErrNotFound marks “no such servable file” (missing, directory, or special
@@ -274,6 +313,10 @@ func HandleList(w http.ResponseWriter, r *http.Request) {
 		apiErr.Write(w)
 		return
 	}
+	if limited := config.CheckRateLimit(config.BucketFilesList, time.Now()); limited != nil {
+		config.WriteRateLimited(w, config.BucketFilesList)
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -293,30 +336,27 @@ func HandleFile(w http.ResponseWriter, r *http.Request, name string) {
 		writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+	if limited := config.CheckRateLimit(config.BucketFiles, time.Now()); limited != nil {
+		config.WriteRateLimited(w, config.BucketFiles)
+		return
+	}
 	if decoded, err := url.PathUnescape(name); err == nil {
 		name = decoded
 	}
-	resolved, err := Resolve(Root(), name)
+	// Single verified open (P2-5): the fd below is SameFile-verified against
+	// the vetted resolution — a symlink swap in between fails closed.
+	f, fi, err := OpenResolved(Root(), name)
 	if err != nil {
 		writeErr(w, resolveStatus(err), resolveMessage(err))
 		return
 	}
+	defer f.Close()
 	ct, ok := ContentTypeFor(name)
 	if !ok {
 		writeErr(w, http.StatusForbidden, "File type is not allowed")
 		return
 	}
-	f, err := os.Open(resolved)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "File not found")
-		return
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() {
-		writeErr(w, http.StatusNotFound, "File not found")
-		return
-	}
+	st := fi
 	if st.Size() > MaxBytes() {
 		writeErr(w, http.StatusRequestEntityTooLarge, "File exceeds the size limit")
 		return

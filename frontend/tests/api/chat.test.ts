@@ -228,13 +228,13 @@ describe('POST /api/chat — provider uplink (stubbed at the network layer)', ()
 		});
 	});
 
-	it('caps history to the most recent 40 entries and 16 000 chars each', async () => {
+	it('caps history count to the most recent 40 entries and 16 000 chars each', async () => {
 		const fetchStub = stubFetch();
 		fetchStub.respondWith(() => new Response('sentinel'));
 
 		const history = Array.from({ length: 60 }, (_, i) => ({
 			role: i % 2 === 0 ? 'user' : 'assistant',
-			content: `turn ${i} ${'y'.repeat(20_000)}`
+			content: `turn ${i} ${'y'.repeat(100)}`
 		}));
 
 		await call(
@@ -249,8 +249,76 @@ describe('POST /api/chat — provider uplink (stubbed at the network layer)', ()
 		expect(payload.messages).toHaveLength(41);
 		expect(payload.messages[0].content).toContain('turn 20 ');
 		expect(payload.messages[39].content).toContain('turn 59 ');
-		expect(payload.messages[39].content).toHaveLength(16_000);
 		expect(payload.messages[40]).toEqual({ role: 'user', content: 'now' });
+	});
+
+	it('slices each history entry to 16 000 chars', async () => {
+		const fetchStub = stubFetch();
+		fetchStub.respondWith(() => new Response('sentinel'));
+
+		await call(
+			postChat,
+			chatRequest(
+				{ message: 'now', history: [{ role: 'user', content: `turn 0 ${'y'.repeat(20_000)}` }] },
+				{ headers: { 'x-provider': 'lmstudio' } }
+			)
+		);
+
+		const payload = JSON.parse(String(fetchStub.calls[0].init.body)) as {
+			messages: Array<{ role: string; content: string }>;
+		};
+		expect(payload.messages[0].content).toHaveLength(16_000);
+	});
+
+	it('budgets total history newest-first: 40x16k forwards <= 96k (P1-2)', async () => {
+		const fetchStub = stubFetch();
+		fetchStub.respondWith(() => new Response('sentinel'));
+
+		const history = Array.from({ length: 40 }, (_, i) => ({
+			role: i % 2 === 0 ? 'user' : 'assistant',
+			content: `turn ${i} ${'z'.repeat(16_000)}`
+		}));
+
+		await call(
+			postChat,
+			chatRequest({ message: 'now', history }, { headers: { 'x-provider': 'lmstudio' } })
+		);
+
+		const payload = JSON.parse(String(fetchStub.calls[0].init.body)) as {
+			messages: Array<{ role: string; content: string }>;
+		};
+		const forwarded = payload.messages
+			.filter((m) => m.content !== 'now')
+			.reduce((sum, m) => sum + m.content.length, 0);
+		// Uncapped this would forward ~640 KB; the budget holds it at 96k.
+		expect(forwarded).toBeLessThanOrEqual(96_000);
+		// Newest context wins: the most recent turn survives, oldest is dropped.
+		const contents = payload.messages.map((m) => m.content);
+		expect(contents.some((c) => c.startsWith('turn 39 '))).toBe(true);
+		expect(contents.some((c) => c.startsWith('turn 0 '))).toBe(false);
+		expect(payload.messages[payload.messages.length - 1]).toEqual({
+			role: 'user',
+			content: 'now'
+		});
+	});
+
+	it('rejects > 400 raw history entries with 413 without contacting upstream', async () => {
+		const fetchStub = stubFetch();
+		fetchStub.respondWith(() => new Response('sentinel'));
+
+		const history = Array.from({ length: 401 }, (_, i) => ({
+			role: 'user',
+			content: `turn ${i}`
+		}));
+
+		const res = await call(
+			postChat,
+			chatRequest({ message: 'now', history }, { headers: { 'x-provider': 'lmstudio' } })
+		);
+
+		expect(res.status).toBe(413);
+		expect(((await res.json()) as { code: string }).code).toBe('payload_too_large');
+		expect(fetchStub.calls).toHaveLength(0);
 	});
 
 	it('caps the system prompt to 8 000 chars', async () => {

@@ -6,6 +6,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { assertApiRequest } from '$lib/config';
 import { errorFields, logEvent } from '$lib/log';
+import { checkRateLimit } from '$lib/rateLimit';
 
 /**
  * GET  /api/stt — capability probe: is a server-side speech engine usable?
@@ -117,6 +118,22 @@ function extensionFor(mimeType: string, bytes: Buffer): string | null {
 	if (bytes.length >= 3 && bytes.toString('ascii', 0, 3) === 'ID3') return 'mp3';
 	if (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return 'mp3';
 	return null;
+}
+
+/**
+ * P3-1: `Buffer.from(s, 'base64')` is forgiving — garbage in decodes to
+ * garbage bytes and still schedules a whisper job, surfacing as a confusing
+ * engine error. Reject non-base64 up front with a 400 instead.
+ */
+function isStrictBase64(raw: string): boolean {
+	const text = raw.trim();
+	if (!text || text.length % 4 !== 0) return false;
+	if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text)) return false;
+	try {
+		return Buffer.from(text, 'base64').toString('base64') === text;
+	} catch {
+		return false;
+	}
 }
 
 /** `en-US` → `en`; anything that is not a language tag is dropped (auto). */
@@ -572,6 +589,10 @@ export const POST: RequestHandler = async ({ request }) => {
 	const denied = assertApiRequest(request);
 	if (denied) return denied;
 
+	// P2-4: transcription warms/spawns a ~150 MB worker — throttle first.
+	const limited = checkRateLimit('stt');
+	if (limited) return limited;
+
 	let body: { audio?: unknown; mimeType?: unknown; language?: unknown };
 	// Pre-parse bound: reject oversized bodies before JSON.parse ever sees
 	// them (the 4 MB audio bound below applies post-base64-decode).
@@ -607,6 +628,15 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (typeof body.audio !== 'string' || !body.audio) {
 		return json(
 			{ error: 'Missing `audio` (base64 clip)', code: 'invalid_request' },
+			{ status: 400 }
+		);
+	}
+	// P3-1: reject non-base64 before any decode or worker contact — garbage
+	// input must be a 400, not a confusing engine failure.
+	if (!isStrictBase64(body.audio)) {
+		logEvent('stt', 'request_audio_not_base64', { chars: body.audio.length }, 'warn');
+		return json(
+			{ error: 'Invalid `audio` (expected base64 clip)', code: 'invalid_request' },
 			{ status: 400 }
 		);
 	}
