@@ -30,27 +30,30 @@ func TestOpenResolved_ServesVerifiedBytes(t *testing.T) {
 	}
 }
 
-func TestOpenResolved_SymlinkSwapFailsClosed(t *testing.T) {
+func TestOpenResolved_SwappedTargetFailsClosed(t *testing.T) {
 	root := seedRoot(t, map[string]string{"real.txt": "real"})
-	outside := t.TempDir()
-	evil := filepath.Join(outside, "evil.txt")
-	if err := os.WriteFile(evil, []byte("evil"), 0o600); err != nil {
+	evil := filepath.Join(t.TempDir(), "evil.txt")
+	// Different size AND different mtime from the vetted file, so the swap
+	// is observable on every platform (see OpenResolved doc comment).
+	if err := os.WriteFile(evil, []byte("evil-replacement-bytes"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(root, "link.txt")
-	if err := os.Symlink(filepath.Join(root, "real.txt"), link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	// Swap the symlink inside the resolve→open window.
+	// Swap the *resolved target* inside the resolve→open window (rename-over
+	// changes the inode): the fd must no longer match the vetted stat.
 	oldHook := resolveOpenHook
 	resolveOpenHook = func() {
-		_ = os.Remove(link)
-		_ = os.Symlink(evil, link)
+		if err := os.Rename(evil, filepath.Join(root, "real.txt")); err != nil {
+			t.Errorf("swap setup failed: %v", err)
+		}
 	}
 	defer func() { resolveOpenHook = oldHook }()
 
-	if _, _, err := OpenResolved(root, "link.txt"); err != ErrNotFound {
-		t.Errorf("OpenResolved swapped symlink = %v, want ErrNotFound", err)
+	f, _, err := OpenResolved(root, "real.txt")
+	if err != ErrNotFound {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Errorf("OpenResolved swapped target = %v, want ErrNotFound", err)
 	}
 }
 

@@ -157,10 +157,15 @@ var resolveOpenHook func()
 
 // OpenResolved resolves name and opens the result as a single verified step
 // (P2-5 TOCTOU hardening): the served bytes come from the opened fd, and the
-// fd is verified to be the same file Resolve just vetted (os.SameFile) and a
-// regular file. A symlink swap between resolution and open — or a swap that
-// turns the target into a non-regular file — fails closed with ErrNotFound
-// instead of serving an unlisted file.
+// fd is verified to be the file Resolve just vetted before any byte is
+// served. A swap of the resolved target between resolution and open —
+// symlink retarget or rename-over — fails closed with ErrNotFound instead of
+// serving an unlisted file.
+//
+// Identity check is belt-and-braces across platforms: os.SameFile is exact
+// where the OS exposes file IDs (Linux), and size+mtime revalidation covers
+// platforms where it does not (Windows SameFile compares only
+// attributes/timestamps/size, so same-size rapid replacements compare equal).
 func OpenResolved(root, name string) (*os.File, os.FileInfo, error) {
 	resolved, info, err := resolve(root, name)
 	if err != nil {
@@ -174,7 +179,11 @@ func OpenResolved(root, name string) (*os.File, os.FileInfo, error) {
 		return nil, nil, ErrNotFound
 	}
 	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() || !os.SameFile(info, fi) {
+	if err != nil ||
+		!fi.Mode().IsRegular() ||
+		!os.SameFile(info, fi) ||
+		fi.Size() != info.Size() ||
+		!fi.ModTime().Equal(info.ModTime()) {
 		_ = f.Close()
 		return nil, nil, ErrNotFound
 	}
