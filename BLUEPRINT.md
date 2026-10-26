@@ -670,6 +670,9 @@ theglobe/
 ### Phase 2: Text Chat (Week 2) — ✅ shipped via SvelteKit `/api/chat` (no bridge)
 - ~~Bridge server with Hermes API connection~~ → served by `frontend/src/routes/api/chat/+server.ts` (streaming SSE, multi-provider)
 - Text input field + chat history display
+- History anti-amplification contract (P1-2): per-entry 16k slice + 40-entry
+  window, then newest-first fill to a 96k total budget (oldest dropped first);
+  > 400 raw entries → 413 before any upstream is contacted.
 - Streaming text display
 - Basic state transitions (idle → thinking → speaking → idle)
 

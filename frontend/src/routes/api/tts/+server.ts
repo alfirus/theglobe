@@ -1,5 +1,6 @@
 import type { RequestHandler } from './$types';
 import { assertApiRequest, readSettings, resolveTtsTimeoutMs } from '$lib/config';
+import { checkRateLimit } from '$lib/rateLimit';
 import {
 	MAX_TTS_TEXT,
 	chunkText,
@@ -30,6 +31,10 @@ import {
 export const POST: RequestHandler = async ({ request }) => {
 	const denied = assertApiRequest(request);
 	if (denied) return denied;
+
+	// P2-4: synthesis spawns engine processes — throttle first.
+	const limited = checkRateLimit('tts');
+	if (limited) return limited;
 
 	let text: unknown;
 	try {
