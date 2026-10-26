@@ -109,3 +109,46 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  supply-audit:
+    name: supply · npm audit (high/critical)
+    # Same gate scope as `quality`: PRs into main + pushes to main.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Audit (fail on high/critical)
+        run: npm audit --audit-level=high
+
+  secrets:
+    name: secrets · gitleaks scan
+    # Secret scan runs on every push/PR like the guard job — cheap and
+    # catches leaked secrets before they reach main.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout (full history for leak scan)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks scan (no allow-list; baseline empty)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
