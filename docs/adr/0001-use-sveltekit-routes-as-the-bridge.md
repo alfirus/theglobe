@@ -1,6 +1,6 @@
 # ADR 0001 — Use SvelteKit Routes as the Bridge
 
-**Status:** Accepted — 25 September 2026
+**Status:** Superseded by ADR 0002 (Go backend for The Globe) — 3 October 2026 (was: Accepted — 25 September 2026)
 **Date:** 2026-09-25
 **Deciders:** Owner (alfirus)
 

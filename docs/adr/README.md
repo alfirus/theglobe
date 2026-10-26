@@ -22,9 +22,10 @@ All ADRs follow the MADR-style template in `TEMPLATE.md`:
 
 | ADR | Repo | File | Status |
 | --- | --- | --- | --- |
-| 0001 | `alfirus/theglobe` | `docs/adr/0001-use-sveltekit-routes-as-the-bridge.md` | Accepted |
+| 0001 | `alfirus/theglobe` | `docs/adr/0001-use-sveltekit-routes-as-the-bridge.md` | Superseded by 0002 |
+| 0002 | `alfirus/theglobe` | `docs/adr/0002-go-backend-for-the-globe.md` | Proposed |
 
-0001 is the SvelteKit-routes-as-bridge decision and stays where it is — it is not renumbered and not reissued. **The next ADR written anywhere in the org is 0002.** A number is reserved by the open ADR PR, not by a local edit: put the number in the PR title when you claim it, so two repos never take the same one.
+0001 is the SvelteKit-routes-as-bridge decision and stays where it is — it is not renumbered and not reissued. 0002 (Go backend for The Globe, owner decision 2026-09-29) supersedes 0001's core clause and is claimed by this repo's open ADR PR. **The next ADR written anywhere in the org is 0003.** A number is reserved by the open ADR PR, not by a local edit: put the number in the PR title when you claim it, so two repos never take the same one.
 
 ## Who May Accept
 
