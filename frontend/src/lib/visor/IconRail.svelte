@@ -7,14 +7,18 @@
 	let {
 		count = 0,
 		active = false,
+		filesActive = false,
 		onToggleConversations = () => {},
+		onToggleFiles = () => {},
 		onNew = () => {},
 		onFocusComposer = () => {},
 		onFocusTranscript = () => {}
 	}: {
 		count?: number;
 		active?: boolean;
+		filesActive?: boolean;
 		onToggleConversations?: () => void;
+		onToggleFiles?: () => void;
 		onNew?: () => void;
 		onFocusComposer?: () => void;
 		onFocusTranscript?: () => void;
@@ -54,6 +58,26 @@
 				stroke-width="1.6"
 			>
 				<path d="M12 5v14M5 12h14"></path>
+			</svg>
+		</button>
+
+		<button
+			class="rail-btn"
+			class:active={filesActive}
+			onclick={onToggleFiles}
+			title="Desktop files"
+			aria-label="Desktop files"
+			aria-pressed={filesActive}
+		>
+			<svg
+				viewBox="0 0 24 24"
+				width="16"
+				height="16"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.6"
+			>
+				<path d="M4 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"></path>
 			</svg>
 		</button>
 
