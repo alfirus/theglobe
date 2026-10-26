@@ -4,17 +4,11 @@
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="text-scale" content="scale" />
-		<link rel="preconnect" href="https://fonts.googleapis.com" />
-		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 		<!--
-			Visor HUD type stack: Chakra Petch (HUD labels), Inter (body copy),
-			JetBrains Mono (data readouts). app.css carries display-swap
-			fallbacks so the UI stays legible when the machine is offline.
+			Visor HUD type stack is OFFLINE-FIRST (P3-2): no remote font
+			hosts — `app.css` falls back to Segoe UI / system-ui / Roboto
+			and Consolas, so there is no privacy ping and no FOUC offline.
 		-->
-		<link
-			href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap"
-			rel="stylesheet"
-		/>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

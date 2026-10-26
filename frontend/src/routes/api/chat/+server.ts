@@ -14,12 +14,21 @@ import {
 	type Provider
 } from '$lib/config';
 import { errorFields, logEvent } from '$lib/log';
+import { checkRateLimit } from '$lib/rateLimit';
 
 /** Request-shape caps (contract: POST /api/chat — see card t_afd2c465). */
 const MAX_MESSAGE = 32_000;
 const MAX_SYSTEM_PROMPT = 8_000;
 const MAX_HISTORY_ENTRIES = 40;
 const MAX_HISTORY_CONTENT = 16_000;
+/**
+ * P1-2 anti-amplification: per-entry caps alone still allow
+ * 40 × 16k ≈ 640 KB upstream per request. The total history payload is
+ * budgeted newest-first (recent context wins, oldest dropped first).
+ * Past the raw-entry hard ceiling the request is rejected outright.
+ */
+const MAX_HISTORY_TOTAL = 96_000;
+const MAX_HISTORY_RAW_ENTRIES = 400;
 
 /**
  * Deadline for the provider's *response headers* only (P1-2: "no request
@@ -196,6 +205,10 @@ export const POST: RequestHandler = async ({ request }) => {
 	const denied = assertApiRequest(request);
 	if (denied) return denied;
 
+	// P2-4: spawning/upstream work starts here — throttle first.
+	const limited = checkRateLimit('chat');
+	if (limited) return limited;
+
 	let body: Record<string, unknown>;
 	try {
 		body = (await request.json()) as Record<string, unknown>;
@@ -266,15 +279,52 @@ export const POST: RequestHandler = async ({ request }) => {
 	const messages: ChatMessage[] = [];
 	if (systemPrompt.trim()) messages.push({ role: 'system', content: systemPrompt });
 
-	// Contract: history[] precedes message, capped to the most recent entries (H6).
+	// Contract: history[] precedes message — most-recent entries win (H6),
+	// under a total-payload budget (P1-2: 40 × 16k with no total cap was a
+	// ~640 KB/request upstream amplification). Past the raw-entry hard
+	// ceiling the request is rejected before any upstream is contacted.
+	if (Array.isArray(body.history) && body.history.length > MAX_HISTORY_RAW_ENTRIES) {
+		logEvent(
+			'chat',
+			'history_too_large',
+			{ entries: body.history.length, ceiling: MAX_HISTORY_RAW_ENTRIES },
+			'warn'
+		);
+		return json(
+			{
+				error: `History exceeds ${MAX_HISTORY_RAW_ENTRIES} entries`,
+				code: 'payload_too_large'
+			},
+			{ status: 413 }
+		);
+	}
 	if (Array.isArray(body.history)) {
+		const kept: ChatMessage[] = [];
 		for (const entry of body.history.slice(-MAX_HISTORY_ENTRIES)) {
 			if (!entry || typeof entry !== 'object') continue;
 			const { role, content } = entry as { role?: unknown; content?: unknown };
 			if ((role === 'user' || role === 'assistant') && typeof content === 'string' && content) {
-				messages.push({ role, content: content.slice(0, MAX_HISTORY_CONTENT) });
+				kept.push({ role, content: content.slice(0, MAX_HISTORY_CONTENT) });
 			}
 		}
+		// Newest-first fill: walk back from the most recent turn, admitting
+		// turns while they fit the budget; older turns are dropped first.
+		let budget = MAX_HISTORY_TOTAL;
+		const admitted: ChatMessage[] = [];
+		for (let i = kept.length - 1; i >= 0; i--) {
+			if (kept[i].content.length > budget) break;
+			budget -= kept[i].content.length;
+			admitted.unshift(kept[i]);
+		}
+		if (admitted.length < kept.length) {
+			logEvent(
+				'chat',
+				'history_budgeted',
+				{ kept: kept.length, admitted: admitted.length, budget: MAX_HISTORY_TOTAL },
+				'debug'
+			);
+		}
+		messages.push(...admitted);
 	}
 
 	messages.push({ role: 'user', content: message });

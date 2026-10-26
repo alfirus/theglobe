@@ -1,5 +1,6 @@
 import type { RequestHandler } from './$types';
 import { assertApiRequest, readSettings, resolveTtsTimeoutMs } from '$lib/config';
+import { checkRateLimit } from '$lib/rateLimit';
 import {
 	MAX_TTS_STREAM_TEXT,
 	TTS_STREAM_CHUNK_TEXT,
@@ -44,6 +45,10 @@ import {
 export const POST: RequestHandler = async ({ request }) => {
 	const denied = assertApiRequest(request);
 	if (denied) return denied;
+
+	// P2-4: one request per sentence — throttle first (generous bucket).
+	const limited = checkRateLimit('tts-stream');
+	if (limited) return limited;
 
 	let body: { text?: unknown; index?: unknown };
 	try {
