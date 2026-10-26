@@ -37,9 +37,31 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from typing import NoReturn
+
+
+# Server-local paths must never reach the browser: Node surfaces `error` copy
+# to the client (card t_c0ae5752). stderr diagnostics via log() keep the full
+# paths for the ops log — only stdout JSON is sanitized here.
+_ABS_PATH_RE = re.compile(
+    r"[A-Za-z]:[\\/][^\s\"'`]+"  # Windows: C:\… / C:/…
+    r"|(?<![\w/])"  # POSIX: /… (not mid-word, so `audio/webm` survives)
+    r"/(?:[^\s\"'`/]+/)*[^\s\"'`]*"
+)
+
+
+def sanitize_error(message: str) -> str:
+    """Replace absolute paths with their basename (or drop them when bare)."""
+
+    def _basename(match: re.Match[str]) -> str:
+        token = match.group(0)
+        base = token.replace("\\", "/").rsplit("/", 1)[-1].strip().strip(".,:;\"'`")
+        return base if base else ""
+
+    return re.sub(r"\s{2,}", " ", _ABS_PATH_RE.sub(_basename, message)).strip()
 
 
 def emit(obj: dict) -> None:
@@ -116,7 +138,7 @@ def main() -> None:
         try:
             model, engine = loader(model_name)
         except Exception as exc:  # noqa: BLE001 — reported, then the next engine is tried
-            errors.append(f"{loader.__name__}: {type(exc).__name__}: {exc}")
+            errors.append(f"{loader.__name__}: {type(exc).__name__}: {sanitize_error(str(exc))[:500]}")
             continue
         load_ms = int((time.time() - started) * 1000)
         emit(
@@ -169,13 +191,9 @@ def main() -> None:
                 text = (result.get("text") or "").strip()
             emit({"id": rid, "text": text, "ms": int((time.time() - started) * 1000)})
         except Exception as exc:  # noqa: BLE001 — one bad clip must not kill the worker
-            emit(
-                {
-                    "id": rid,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "code": "transcribe_failed",
-                }
-            )
+            detail = sanitize_error(str(exc))[:500]
+            text = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+            emit({"id": rid, "error": text, "code": "transcribe_failed"})
 
 
 if __name__ == "__main__":
